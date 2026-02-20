@@ -130,8 +130,16 @@ impl<P: Vst3Plugin + 'static> IPlugViewTrait for View<P> {
             return kInvalidArgument;
         }
 
-        let editor_size = self.editor.borrow().as_ref().unwrap().window_size();
+        #[allow(unused_mut)]
+        let mut editor_size = self.editor.borrow().as_ref().unwrap().window_size();
 
+        // on windows, hosts expect physical sizes 
+        #[cfg(target_os = "windows")]
+        {
+            let factor = self.editor.borrow_mut().as_mut().unwrap().scale();
+            editor_size = (editor_size.0 * factor, editor_size.1 * factor);
+        }
+        
         let size = unsafe { &mut *size };
         size.left = 0;
         size.top = 0;
