@@ -95,14 +95,8 @@ impl PluginCanvasWindowAdapter {
         *self.view.borrow_mut() = Some(view);
     }
 
-    pub fn set_scale(&self, scale: f64) {
-        self.scale.store(scale, Ordering::Release);
-
-        let combined_scale = scale * self.plugin_canvas_window.os_scale();
-        
-        self.slint_window.dispatch_event(
-            WindowEvent::ScaleFactorChanged { scale_factor: combined_scale as f32 }
-        );
+    pub fn scale(&self) -> f64 {
+        self.scale.load(Ordering::Relaxed) * self.plugin_canvas_window.os_scale()
     }
 
     pub fn close(&self) {
