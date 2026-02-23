@@ -1,11 +1,11 @@
-use std::{cell::RefCell, ptr::{null_mut, NonNull}, sync::{atomic::{AtomicBool, Ordering}, Arc}};
+use std::{cell::{RefCell}, ptr::{NonNull, null_mut}, sync::{Arc, LazyLock, atomic::{AtomicBool, Ordering}}};
 
 use cursor_icon::CursorIcon;
 use objc2::{msg_send, rc::{Allocated, Retained}, sel, AllocAnyThread};
 use objc2_app_kit::{NSCursor, NSCursorFrameResizeDirections, NSCursorFrameResizePosition, NSHorizontalDirections, NSPasteboardTypeFileURL, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSVerticalDirections, NSView};
 use objc2_core_foundation::{CGPoint, CGSize};
 use objc2_core_graphics::CGWarpMouseCursorPosition;
-use objc2_foundation::{MainThreadMarker, NSArray, NSDefaultRunLoopMode, NSPoint, NSRect, NSRunLoop, NSSize};
+use objc2_foundation::{MainThreadMarker, NSArray, NSDefaultRunLoopMode, NSOperatingSystemVersion, NSPoint, NSProcessInfo, NSRect, NSRunLoop, NSSize, NSTimer};
 use objc2_quartz_core::CADisplayLink;
 use raw_window_handle::{AppKitWindowHandle, HasDisplayHandle, HasWindowHandle, RawWindowHandle};
 
@@ -17,9 +17,14 @@ use crate::window::WindowAttributes;
 
 use super::view::OsWindowView;
 
+static OS_VERSION: LazyLock<NSOperatingSystemVersion> = LazyLock::new(|| {
+    NSProcessInfo::processInfo().operatingSystemVersion()
+});
+
 pub(crate) struct OsWindow {
     window_handle: AppKitWindowHandle,
     display_link: RefCell<Option<Retained<CADisplayLink>>>,
+    fallback_timer: RefCell<Option<Retained<NSTimer>>>,
     event_callback: Box<EventCallback>,
 
     cursor_hidden: AtomicBool,
@@ -60,7 +65,7 @@ impl OsWindowInterface for OsWindow {
         let (view, window_handle) = unsafe {
             let view: Allocated<OsWindowView> = msg_send![view_class, alloc];
             let view: Retained<OsWindowView> = msg_send![view, initWithFrame: view_rect];
-        
+
             let tracking_area = NSTrackingArea::initWithRect_options_owner_userInfo(
                 NSTrackingArea::alloc(),
                 view_rect,
@@ -78,11 +83,11 @@ impl OsWindowInterface for OsWindow {
 
             let parent_view: &mut NSView = &mut *(parent_window_handle.ns_view.as_ptr() as *mut NSView);
             parent_view.addSubview(&view);
-    
+
             let window_handle = AppKitWindowHandle::new(
                 NonNull::new(view.as_ref() as *const NSView as _).unwrap()
             );
-    
+
             (view, window_handle)
         };
 
@@ -91,6 +96,7 @@ impl OsWindowInterface for OsWindow {
         let window = Self {
             window_handle,
             display_link: Default::default(),
+            fallback_timer: RefCell::new(None),
             event_callback,
 
             cursor_hidden: Default::default(),
@@ -100,13 +106,22 @@ impl OsWindowInterface for OsWindow {
 
         let window = Arc::new(ThreadBound::new(window));
 
-        let display_link = unsafe { view.displayLinkWithTarget_selector(&view, sel!(drawRect:)) };
+        // Use displayLinkWithTarget when available and a NSTimer at 60fps as fallback
+        let use_display_link = OS_VERSION.majorVersion >= 15;
 
-        unsafe {
-            display_link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSDefaultRunLoopMode)
-        };
-
-        *window.display_link.borrow_mut() = Some(display_link);
+        if use_display_link {
+            let display_link = unsafe {
+                let display_link = view.displayLinkWithTarget_selector(&view, sel!(drawRect:));
+                display_link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSDefaultRunLoopMode);
+                display_link
+            };
+            *window.display_link.borrow_mut() = Some(display_link);
+        } else {
+            let timer = unsafe {
+                NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(1.0 / 60.0, &view, sel!(drawRect:), None, true)
+            };
+            *window.fallback_timer.borrow_mut() = Some(timer);
+        }
 
         view.set_os_window_ptr(Arc::downgrade(&window).into_raw() as _);
 
@@ -131,6 +146,7 @@ impl OsWindowInterface for OsWindow {
 
     fn set_cursor(&self, cursor: Option<CursorIcon>) {
         if let Some(cursor) = cursor {
+            #[allow(deprecated)]
             let cursor = match cursor {
                 CursorIcon::Default => NSCursor::arrowCursor(),
                 CursorIcon::ContextMenu => NSCursor::contextualMenuCursor(),
@@ -149,26 +165,26 @@ impl OsWindowInterface for OsWindow {
                 CursorIcon::NotAllowed => NSCursor::operationNotAllowedCursor(),
                 CursorIcon::Grab => NSCursor::openHandCursor(),
                 CursorIcon::Grabbing => NSCursor::closedHandCursor(),
-                CursorIcon::EResize => NSCursor::columnResizeCursorInDirections(NSHorizontalDirections::Right),
-                CursorIcon::NResize => NSCursor::rowResizeCursorInDirections(NSVerticalDirections::Up),
-                CursorIcon::NeResize => NSCursor::frameResizeCursorFromPosition_inDirections(NSCursorFrameResizePosition::TopRight, NSCursorFrameResizeDirections::Outward),
-                CursorIcon::NwResize => NSCursor::frameResizeCursorFromPosition_inDirections(NSCursorFrameResizePosition::TopLeft, NSCursorFrameResizeDirections::Outward),
-                CursorIcon::SResize => NSCursor::rowResizeCursorInDirections(NSVerticalDirections::Down),
-                CursorIcon::SeResize => NSCursor::frameResizeCursorFromPosition_inDirections(NSCursorFrameResizePosition::BottomRight, NSCursorFrameResizeDirections::Outward),
-                CursorIcon::SwResize => NSCursor::frameResizeCursorFromPosition_inDirections(NSCursorFrameResizePosition::BottomLeft, NSCursorFrameResizeDirections::Outward),
-                CursorIcon::WResize => NSCursor::columnResizeCursorInDirections(NSHorizontalDirections::Left),
-                CursorIcon::EwResize => NSCursor::columnResizeCursor(),
-                CursorIcon::NsResize => NSCursor::rowResizeCursor(),
-                CursorIcon::NeswResize => NSCursor::frameResizeCursorFromPosition_inDirections(NSCursorFrameResizePosition::TopRight, NSCursorFrameResizeDirections::All),
-                CursorIcon::NwseResize => NSCursor::frameResizeCursorFromPosition_inDirections(NSCursorFrameResizePosition::TopLeft, NSCursorFrameResizeDirections::All),
-                CursorIcon::ColResize => NSCursor::columnResizeCursor(),
-                CursorIcon::RowResize => NSCursor::rowResizeCursor(),
+                CursorIcon::EResize => if OS_VERSION.majorVersion < 15 { NSCursor::resizeRightCursor() } else { NSCursor::columnResizeCursorInDirections(NSHorizontalDirections::Right) },
+                CursorIcon::NResize => if OS_VERSION.majorVersion < 15 { NSCursor::resizeUpCursor() } else {  NSCursor::rowResizeCursorInDirections(NSVerticalDirections::Up) },
+                CursorIcon::NeResize => if OS_VERSION.majorVersion < 15 { NSCursor::arrowCursor() } else { NSCursor::frameResizeCursorFromPosition_inDirections(NSCursorFrameResizePosition::TopRight, NSCursorFrameResizeDirections::Outward) },
+                CursorIcon::NwResize => if OS_VERSION.majorVersion < 15 { NSCursor::arrowCursor() } else { NSCursor::frameResizeCursorFromPosition_inDirections(NSCursorFrameResizePosition::TopLeft, NSCursorFrameResizeDirections::Outward) },
+                CursorIcon::SResize => if OS_VERSION.majorVersion < 15 { NSCursor::resizeDownCursor() } else { NSCursor::rowResizeCursorInDirections(NSVerticalDirections::Down) },
+                CursorIcon::SeResize => if OS_VERSION.majorVersion < 15 { NSCursor::arrowCursor() } else { NSCursor::frameResizeCursorFromPosition_inDirections(NSCursorFrameResizePosition::BottomRight, NSCursorFrameResizeDirections::Outward) },
+                CursorIcon::SwResize => if OS_VERSION.majorVersion < 15 { NSCursor::arrowCursor() } else { NSCursor::frameResizeCursorFromPosition_inDirections(NSCursorFrameResizePosition::BottomLeft, NSCursorFrameResizeDirections::Outward) },
+                CursorIcon::WResize => if OS_VERSION.majorVersion < 15 { NSCursor::resizeLeftCursor() } else { NSCursor::columnResizeCursorInDirections(NSHorizontalDirections::Left) },
+                CursorIcon::EwResize => if OS_VERSION.majorVersion < 15 { NSCursor::resizeLeftRightCursor() } else { NSCursor::columnResizeCursor() },
+                CursorIcon::NsResize => if OS_VERSION.majorVersion < 15 { NSCursor::resizeUpDownCursor() } else { NSCursor::rowResizeCursor() },
+                CursorIcon::NeswResize => if OS_VERSION.majorVersion < 15 { NSCursor::arrowCursor() } else { NSCursor::frameResizeCursorFromPosition_inDirections(NSCursorFrameResizePosition::TopRight, NSCursorFrameResizeDirections::All) },
+                CursorIcon::NwseResize => if OS_VERSION.majorVersion < 15 { NSCursor::arrowCursor() } else { NSCursor::frameResizeCursorFromPosition_inDirections(NSCursorFrameResizePosition::TopLeft, NSCursorFrameResizeDirections::All) },
+                CursorIcon::ColResize => if OS_VERSION.majorVersion < 15 { NSCursor::resizeUpDownCursor() } else { NSCursor::columnResizeCursor() },
+                CursorIcon::RowResize => if OS_VERSION.majorVersion < 15 { NSCursor::resizeLeftRightCursor() } else { NSCursor::rowResizeCursor() },
                 CursorIcon::AllScroll => NSCursor::openHandCursor(),
                 CursorIcon::ZoomIn => NSCursor::arrowCursor(), // TODO
                 CursorIcon::ZoomOut => NSCursor::arrowCursor(), // TODO
                 _ => todo!(),
             };
-    
+
             cursor.set();
 
             if self.cursor_hidden.swap(false, Ordering::Relaxed) {
@@ -190,7 +206,7 @@ impl OsWindowInterface for OsWindow {
         let cg_point = CGPoint::new(screen_position.x, screen_height - screen_position.y);
         CGWarpMouseCursorPosition(cg_point);
     }
-    
+
     fn poll_events(&self) -> Result<(), Error> {
         Ok(())
     }
@@ -203,7 +219,6 @@ impl Drop for OsWindow {
                 display_link.removeFromRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSDefaultRunLoopMode)
             };
         }
-
         self.view().set_os_window_ptr(null_mut());
     }
 }
