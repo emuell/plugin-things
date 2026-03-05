@@ -3,7 +3,7 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
 use raw_window_handle::RawWindowHandle;
-use plugin_canvas::{event::EventResponse, window::WindowAttributes, Event};
+use plugin_canvas::{event::EventResponse, window::WindowAttributes, Event, Window};
 use slint::platform::WindowAdapter;
 
 use crate::{platform::PluginCanvasPlatform, view::PluginView, window_adapter::{PluginCanvasWindowAdapter, WINDOW_ADAPTER_FROM_SLINT, WINDOW_TO_SLINT}};
@@ -91,7 +91,7 @@ impl EditorHandle {
         if let Some(window_adapter) = self.window_adapter() {
             window_adapter.scale()
         } else {
-            1.0
+            Window::sceen_scale()
         }
     }
 
