@@ -303,7 +303,13 @@ impl OsWindowInterface for OsWindow {
         Ok(OsWindowHandle::new(Arc::new(window.into())))
     }
 
+    fn os_screen_scale() -> f64 {
+        // TODO: implement me
+        return 1.0
+    }
+    
     fn os_scale(&self) -> f64 {
+        // TODO: implement me
         1.0
     }
 
