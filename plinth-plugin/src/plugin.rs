@@ -12,7 +12,7 @@ pub trait Plugin {
     const HAS_AUX_INPUT: bool = false;
     // Enables note, midi event input ports.
     const HAS_NOTE_INPUT: bool = false;
-    // Enables note, midi event output ports (currently unused).
+    // Enables note, midi event output ports.
     const HAS_NOTE_OUTPUT: bool = false;
     // Enables delivery of the specified per-note expression dimensions (VST3 note expression / CLAP note expression) when HAS_NOTE_INPUT is true.
     const NOTE_EXPRESSIONS: NoteExpressions = if Self::HAS_NOTE_INPUT { NoteExpressions::DEFAULT } else { NoteExpressions::NONE };

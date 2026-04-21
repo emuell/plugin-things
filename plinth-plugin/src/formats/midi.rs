@@ -124,3 +124,50 @@ pub(crate) fn parse_midi_event(
         _ => None,
     }
 }
+
+/// Convert a note or `Midi*` event into a raw 3-byte MIDI message, for sending events to the host.
+/// Returns the event's sample offset and MIDI bytes. Unused trailing bytes are zero.
+///
+/// Returns `None` for events which have no MIDI representation, such as note-offs with
+/// wildcard channels or keys, note expressions, or parameter events.
+pub(crate) fn midi_event_to_bytes(event: &Event) -> Option<(usize, [u8; 3])> {
+    fn to_7bit(value: f64) -> u8 {
+        (value * 127.0).round().clamp(0.0, 127.0) as u8
+    }
+
+    match *event {
+        Event::NoteOn { sample_offset, channel, key, velocity, .. } => {
+            // Velocity 0 would turn the note-on into a note-off
+            let velocity = to_7bit(velocity).max(1);
+            Some((sample_offset, [0x90 | (channel & 0x0F), key & 0x7F, velocity]))
+        }
+
+        Event::NoteOff { sample_offset, channel: Some(channel), key: Some(key), velocity, .. } => {
+            Some((sample_offset, [0x80 | (channel & 0x0F), key & 0x7F, to_7bit(velocity)]))
+        }
+
+        Event::MidiPolyPressure { sample_offset, channel, key, value } => {
+            Some((sample_offset, [0xA0 | (channel & 0x0F), key & 0x7F, to_7bit(value)]))
+        }
+
+        Event::MidiControlChange { sample_offset, channel, controller, value } => {
+            Some((sample_offset, [0xB0 | (channel & 0x0F), controller & 0x7F, to_7bit(value)]))
+        }
+
+        Event::MidiProgramChange { sample_offset, channel, program } => {
+            Some((sample_offset, [0xC0 | (channel & 0x0F), program & 0x7F, 0]))
+        }
+
+        Event::MidiChannelPressure { sample_offset, channel, value } => {
+            Some((sample_offset, [0xD0 | (channel & 0x0F), to_7bit(value), 0]))
+        }
+
+        Event::MidiPitchBend { sample_offset, channel, semitones } => {
+            // Assuming the standard +-2 semitone range
+            let bend = (semitones / 2.0 * 8192.0 + 8192.0).round().clamp(0.0, 16383.0) as u16;
+            Some((sample_offset, [0xE0 | (channel & 0x0F), (bend & 0x7F) as u8, (bend >> 7) as u8]))
+        }
+
+        _ => None,
+    }
+}

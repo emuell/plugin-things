@@ -51,7 +51,7 @@ impl<P: ClapPlugin> NotePorts<P> {
 
         info.id = index;
         info.supported_dialects = CLAP_NOTE_DIALECT_CLAP;
-        if is_input && !P::MIDI_CAPABILITIES.is_empty() {
+        if (is_input && !P::MIDI_CAPABILITIES.is_empty()) || (!is_input && P::HAS_NOTE_OUTPUT) {
             info.supported_dialects |= CLAP_NOTE_DIALECT_MIDI;
         }
         info.preferred_dialect = CLAP_NOTE_DIALECT_CLAP;

@@ -28,6 +28,14 @@ impl EventListPush for Vec<Event> {
     }
 }
 
+/// Discards all passed events
+struct DiscardEvents;
+impl<T> Extend<T> for DiscardEvents {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        iter.into_iter().for_each(drop);
+    }
+}
+
 /// Runs a plinth processor on a CPAL audio stream
 pub struct AudioState<P: StandalonePlugin> {
     pub processor: P::Processor,
@@ -96,10 +104,13 @@ impl<P: StandalonePlugin> AudioState<P> {
                 }
             }
 
-            // Process and drain all events on first run, assuming they have no time tags
-            let aux: Option<&Buffer> = None;
-            self.processor
-                .process(&mut self.buffer, aux, None, self.pending_events.drain(..));
+            // Drain all events on first run, assuming they have no time tags.
+            let input_events = self.pending_events.drain(..);
+            // MIDI out not supported right now
+            let output_events = &mut DiscardEvents;
+
+            // Process audio and events
+            self.processor.process(&mut self.buffer, None::<&Buffer>, None, input_events, output_events);
 
             // Reinterleave chunk back into CPAL buffer
             for frame in 0..chunk_size {

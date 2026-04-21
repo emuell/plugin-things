@@ -26,7 +26,16 @@ pub enum ProcessState {
 
 pub trait Processor: Send {
     fn reset(&mut self);
-    fn process(&mut self, buffer: &mut impl SignalMut, aux: Option<&impl Signal>, transport: Option<Transport>, events: impl Iterator<Item = Event>) -> ProcessState;
-    // Called when there's no audio to process
-    fn process_events(&mut self, events: impl Iterator<Item = Event>);
+
+    /// Process a block of audio.
+    ///
+    ///- `input_events` yields events from the host and editor for this block.
+    ///- `output_events` sends note, note expression and `Midi*` events to the host. 
+    ///  Requires [`Plugin::HAS_NOTE_OUTPUT`](crate::Plugin::HAS_NOTE_OUTPUT).
+    fn process(&mut self, buffer: &mut impl SignalMut, aux: Option<&impl Signal>, transport: Option<Transport>, input_events: impl Iterator<Item = Event>, output_events: &mut impl Extend<Event>) -> ProcessState;
+    
+    /// Called when there's no audio to process. See [`Processor::process`] for `output_events`.
+    ///
+    /// NB: CLAP calls this outside of `process` to flush parameter changes. Output events are dropped there.
+    fn process_events(&mut self, input_events: impl Iterator<Item = Event>, output_events: &mut impl Extend<Event>);
 }

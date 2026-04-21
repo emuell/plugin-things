@@ -13,13 +13,14 @@ use vst3::Steinberg::Vst::ControllerNumbers_::{kAfterTouch, kCtrlProgramChange, 
 use vst3::Steinberg::Vst::{CtrlNumber, IMidiMapping, IMidiMappingTrait, INoteExpressionController, INoteExpressionPhysicalUIMapping};
 use vst3::{ComPtr, ComRef};
 use vst3::Steinberg::{int16, int32, kInvalidArgument, kNoInterface, kResultFalse, kResultOk, kResultTrue, tresult, uint32, FIDString, FUnknown, IBStream, IPlugView, IPluginBaseTrait, TBool, TUID};
-use vst3::Steinberg::Vst::{kInfiniteTail, kNoParentUnitId, kNoProgramListId, kNoTail, BusDirection, BusDirections, BusDirections_, BusInfo, BusInfo_::BusFlags_, BusTypes_, CString, IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentHandler, IComponentTrait, IEditController, IEditController2, IEditController2Trait, IEditControllerTrait, IHostApplication, IHostApplicationTrait, IProcessContextRequirements, IProcessContextRequirementsTrait, IProcessContextRequirements_, IUnitInfo, IUnitInfoTrait, IoMode, IoModes_, KnobMode, MediaType, MediaTypes, MediaTypes_, ParamID, ParamValue, ParameterInfo_, ProcessData, ProcessSetup, ProgramListID, ProgramListInfo, RoutingInfo, SpeakerArr, SpeakerArrangement, String128, SymbolicSampleSizes_, TChar, UnitID, UnitInfo, ViewType::kEditor};
+use vst3::Steinberg::Vst::{kInfiniteTail, kNoParentUnitId, kNoProgramListId, kNoTail, BusDirection, BusDirections, BusDirections_, BusInfo, BusInfo_::BusFlags_, BusTypes_, CString, IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentHandler, IComponentTrait, IEditController, IEditController2, IEditController2Trait, IEditControllerTrait, IEventList, IEventListTrait, IHostApplication, IHostApplicationTrait, IProcessContextRequirements, IProcessContextRequirementsTrait, IProcessContextRequirements_, IUnitInfo, IUnitInfoTrait, IoMode, IoModes_, KnobMode, MediaType, MediaTypes, MediaTypes_, ParamID, ParamValue, ParameterInfo_, ProcessData, ProcessSetup, ProgramListID, ProgramListInfo, RoutingInfo, SpeakerArr, SpeakerArrangement, String128, SymbolicSampleSizes_, TChar, UnitID, UnitInfo, ViewType::kEditor};
 use widestring::U16CStr;
 
+use crate::event::Event;
 use crate::formats::PluginFormat;
 use crate::host::HostInfo;
-use crate::vst3::parameters::{MidiParameter, MidiParameters};
-use crate::{Event, Parameters, ProcessMode, ProcessState, Processor, ProcessorConfig};
+use crate::vst3::{event::event_to_vst3_event, parameters::{MidiParameter, MidiParameters}};
+use crate::{Parameters, ProcessMode, ProcessState, Processor, ProcessorConfig};
 use crate::editor::NoEditor;
 use crate::parameters::{group::{self, ParameterGroupRef}, has_duplicates, info::ParameterInfo};
 use crate::string::{char16_to_string, copy_str_to_char16};
@@ -42,6 +43,46 @@ impl<P: Vst3Plugin> Default for AudioThreadState<P> {
         Self {
             processor: Default::default(),
             aux_active: true.into(),
+        }
+    }
+}
+
+/// Sends events from the processor's `output_events` to the host.
+struct Vst3OutputEventList<'a> {
+    event_list: Option<ComRef<'a, IEventList>>,
+    has_note_output: bool,
+    max_sample_offset: usize,
+}
+
+impl Vst3OutputEventList<'_> {
+    fn new(ptr: *mut IEventList, has_note_output: bool, num_samples: i32) -> Self {
+        Self {
+            event_list: unsafe { ComRef::from_raw(ptr) },
+            has_note_output,
+            max_sample_offset: usize::try_from(num_samples).unwrap_or(0).saturating_sub(1),
+        }
+    }
+}
+
+impl Extend<Event> for Vst3OutputEventList<'_> {
+    fn extend<T: IntoIterator<Item = Event>>(&mut self, iter: T) {
+        if !self.has_note_output {
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if iter.into_iter().next().is_some() && !WARNED.swap(true, Ordering::Relaxed) {
+                tracing::warn!("Dropping output events: Plugin::HAS_NOTE_OUTPUT is not enabled");
+            }
+            return;
+        }
+        // The host passes no output list when the event output bus is not active
+        let Some(event_list) = &self.event_list else {
+            return;
+        };
+        for event in iter {
+            if let Some(mut vst3_event) = event_to_vst3_event(&event, self.max_sample_offset)
+                && unsafe { event_list.addEvent(&mut vst3_event) } != kResultOk
+            {
+                tracing::debug!("Host rejected output event: {event:?}");
+            }
         }
     }
 }
@@ -276,10 +317,6 @@ impl<P: Vst3Plugin> IAudioProcessorTrait for PluginComponent<P> {
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
         let data = unsafe { &mut *data };
 
-        let midi_parameters = self.midi_parameters.borrow();
-        let parameter_change_iterator = ParameterChangeIterator::new(data.inputParameterChanges, &midi_parameters);
-        let event_iterator = EventIterator::new(data.inputEvents, P::NOTE_EXPRESSIONS);
-        let all_events = event_iterator.chain(parameter_change_iterator);
         let is_data_dump = data.inputs.is_null() || data.outputs.is_null() || data.numInputs == 0 || data.numSamples == 0;
 
         // On some platforms, this cast is needed
@@ -327,8 +364,15 @@ impl<P: Vst3Plugin> IAudioProcessorTrait for PluginComponent<P> {
             return kResultFalse;
         };
 
+        let midi_parameters = self.midi_parameters.borrow();
+        let parameter_change_iterator = ParameterChangeIterator::new(data.inputParameterChanges, &midi_parameters);
+        let event_iterator = EventIterator::new(data.inputEvents, P::NOTE_EXPRESSIONS);
+
+        let input_events = event_iterator.chain(parameter_change_iterator);
+        let output_events = &mut Vst3OutputEventList::new(data.outputEvents, P::HAS_NOTE_OUTPUT, data.numSamples);
+
         if is_data_dump {
-            processor.process_events(all_events);
+            processor.process_events(input_events, output_events);
             return kResultOk;
         }
 
@@ -348,7 +392,7 @@ impl<P: Vst3Plugin> IAudioProcessorTrait for PluginComponent<P> {
             Some(unsafe { &*data.processContext }.into())
         };
 
-        let process_state = processor.process(&mut main_output, aux_input.as_ref(), transport, all_events);
+        let process_state = processor.process(&mut main_output, aux_input.as_ref(), transport, input_events, output_events);
 
         let tail_length = match process_state {
             ProcessState::Error => {

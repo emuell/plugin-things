@@ -1,11 +1,115 @@
 use std::collections::BTreeMap;
 use std::ffi::c_void;
+use std::mem::size_of;
 
-use clap_sys::events::{clap_event_note, clap_event_note_expression, clap_event_param_mod, clap_event_param_value, clap_event_midi, clap_input_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_EXPRESSION, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_MOD, CLAP_EVENT_PARAM_VALUE, CLAP_NOTE_EXPRESSION_TUNING, CLAP_EVENT_MIDI, CLAP_NOTE_EXPRESSION_BRIGHTNESS, CLAP_NOTE_EXPRESSION_EXPRESSION, CLAP_NOTE_EXPRESSION_PAN, CLAP_NOTE_EXPRESSION_PRESSURE, CLAP_NOTE_EXPRESSION_VIBRATO, CLAP_NOTE_EXPRESSION_VOLUME};
+use clap_sys::events::{clap_event_header, clap_event_midi, clap_event_note, clap_event_note_expression, clap_event_param_mod, clap_event_param_value, clap_input_events, clap_note_expression, clap_output_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, CLAP_EVENT_NOTE_EXPRESSION, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_MOD, CLAP_EVENT_PARAM_VALUE, CLAP_NOTE_EXPRESSION_BRIGHTNESS, CLAP_NOTE_EXPRESSION_EXPRESSION, CLAP_NOTE_EXPRESSION_PAN, CLAP_NOTE_EXPRESSION_PRESSURE, CLAP_NOTE_EXPRESSION_TUNING, CLAP_NOTE_EXPRESSION_VIBRATO, CLAP_NOTE_EXPRESSION_VOLUME};
 
-use crate::{formats::midi::{note_channel, note_id, note_key, parse_midi_event}, parameters::info::ParameterInfo, Event, MidiCapabilities, NoteExpressions, ParameterId};
+use crate::{formats::midi::{midi_event_to_bytes, note_channel, note_id, note_key, parse_midi_event}, parameters::info::ParameterInfo, Event, MidiCapabilities, NoteExpressions, ParameterId};
 
 use super::parameters::map_parameter_value_from_clap;
+
+/// Send a note, note expression or MIDI event to the host. `max_sample_offset` is the last valid
+/// sample offset in the current block. Events get clamped to it.
+pub fn send_note_event_to_host(event: &Event, out_events: *const clap_output_events, max_sample_offset: usize) {
+    if out_events.is_null() {
+        return;
+    }
+    let out = unsafe { &*out_events };
+
+    let header = |size: usize, sample_offset: usize, type_: u16| {
+        if sample_offset > max_sample_offset {
+            tracing::debug!("Clamping output event sample offset {sample_offset} to {max_sample_offset}");
+        }
+        clap_event_header {
+            size: size as u32,
+            time: sample_offset.min(max_sample_offset) as u32,
+            space_id: CLAP_CORE_EVENT_SPACE_ID,
+            type_,
+            // Plugin generated events are no live user events
+            flags: 0,
+        }
+    };
+
+    let push = |header: &clap_event_header| {
+        if !unsafe { (out.try_push.unwrap())(out, header) } {
+            tracing::debug!("Host rejected output event: event queue is full");
+        }
+    };
+
+    let note_expression = |sample_offset: usize, channel: Option<u8>, key: Option<u8>, note_id: Option<u32>, expression_id: clap_note_expression, value: f64| {
+        let clap_event = clap_event_note_expression {
+            header: header(size_of::<clap_event_note_expression>(), sample_offset, CLAP_EVENT_NOTE_EXPRESSION),
+            expression_id,
+            note_id: note_id.map_or(-1, |id| id as i32),
+            port_index: 0,
+            channel: channel.map_or(-1, |channel| channel as i16),
+            key: key.map_or(-1, |key| key as i16),
+            value,
+        };
+        push(&clap_event.header);
+    };
+
+    match *event {
+        Event::NoteOn { sample_offset, channel, key, note_id, velocity } => {
+            let clap_event = clap_event_note {
+                header: header(size_of::<clap_event_note>(), sample_offset, CLAP_EVENT_NOTE_ON),
+                note_id: note_id.map_or(-1, |id| id as i32),
+                port_index: 0,
+                channel: channel as i16,
+                key: key as i16,
+                velocity,
+            };
+            push(&clap_event.header);
+        }
+
+        Event::NoteOff { sample_offset, channel, key, note_id, velocity } => {
+            let clap_event = clap_event_note {
+                header: header(size_of::<clap_event_note>(), sample_offset, CLAP_EVENT_NOTE_OFF),
+                note_id: note_id.map_or(-1, |id| id as i32),
+                port_index: 0,
+                channel: channel.map_or(-1, |channel| channel as i16),
+                key: key.map_or(-1, |key| key as i16),
+                velocity,
+            };
+            push(&clap_event.header);
+        }
+
+        Event::PolyVolume { sample_offset, channel, key, note_id, gain } => {
+            // pass value in [0..4] as it is
+            note_expression(sample_offset, channel, key, note_id, CLAP_NOTE_EXPRESSION_VOLUME, gain);
+        }
+        Event::PolyPressure { sample_offset, channel, key, note_id, value } => {
+            note_expression(sample_offset, channel, key, note_id, CLAP_NOTE_EXPRESSION_PRESSURE, value);
+        }
+        Event::PolyPan { sample_offset, channel, key, note_id, pan } => {
+            // [-1, +1] -> CLAP pan: 0=left, 0.5=center, 1=right
+            note_expression(sample_offset, channel, key, note_id, CLAP_NOTE_EXPRESSION_PAN, (pan + 1.0) / 2.0);
+        }
+        Event::PolyTuning { sample_offset, channel, key, note_id, semitones } => {
+            note_expression(sample_offset, channel, key, note_id, CLAP_NOTE_EXPRESSION_TUNING, semitones);
+        }
+        Event::PolyVibrato { sample_offset, channel, key, note_id, amount } => {
+            note_expression(sample_offset, channel, key, note_id, CLAP_NOTE_EXPRESSION_VIBRATO, amount);
+        }
+        Event::PolyExpression { sample_offset, channel, key, note_id, amount } => {
+            note_expression(sample_offset, channel, key, note_id, CLAP_NOTE_EXPRESSION_EXPRESSION, amount);
+        }
+        Event::PolyBrightness { sample_offset, channel, key, note_id, amount } => {
+            note_expression(sample_offset, channel, key, note_id, CLAP_NOTE_EXPRESSION_BRIGHTNESS, amount);
+        }
+
+        _ => {
+            if let Some((sample_offset, data)) = midi_event_to_bytes(event) {
+                let clap_event = clap_event_midi {
+                    header: header(size_of::<clap_event_midi>(), sample_offset, CLAP_EVENT_MIDI),
+                    port_index: 0,
+                    data,
+                };
+                push(&clap_event.header);
+            }
+        }
+    }
+}
 
 pub struct EventIterator<'a> {
     note_expressions: NoteExpressions,

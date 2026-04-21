@@ -27,9 +27,10 @@ impl Processor for GainPluginProcessor {
         buffer: &mut impl SignalMut,
         _aux: Option<&impl Signal>,
         _transport: Option<Transport>,
-        events: impl Iterator<Item = Event>
+        input_events: impl Iterator<Item = Event>,
+        _output_events: &mut impl Extend<Event>,
     ) -> ProcessState {
-        for event in events {
+        for event in input_events {
             match self.parameters.process_event(&event) {
                 Ok(_) => {},
                 Err(e) => {
@@ -50,8 +51,8 @@ impl Processor for GainPluginProcessor {
         ProcessState::Normal
     }
 
-    fn process_events(&mut self, events: impl Iterator<Item = Event>) {
-        for event in events {
+    fn process_events(&mut self, input_events: impl Iterator<Item = Event>, _output_events: &mut impl Extend<Event>) {
+        for event in input_events {
             match self.parameters.process_event(&event) {
                 Ok(_) => {},
                 Err(e) => {

@@ -1,11 +1,11 @@
 use std::{collections::BTreeMap, ffi::{CStr, c_char, c_void}, iter::zip, ptr::{null, null_mut}, sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}}};
 
-use clap_sys::{events::clap_input_events, ext::{audio_ports::CLAP_EXT_AUDIO_PORTS, draft::undo::{CLAP_EXT_UNDO, clap_host_undo}, gui::{CLAP_EXT_GUI, clap_host_gui}, latency::CLAP_EXT_LATENCY, note_ports::CLAP_EXT_NOTE_PORTS, params::{CLAP_EXT_PARAMS, clap_host_params}, render::CLAP_EXT_RENDER, state::{CLAP_EXT_STATE, clap_host_state}, tail::{CLAP_EXT_TAIL, clap_host_tail}, timer_support::{CLAP_EXT_TIMER_SUPPORT, clap_host_timer_support}}, host::clap_host, plugin::clap_plugin, process::{CLAP_PROCESS_CONTINUE, CLAP_PROCESS_CONTINUE_IF_NOT_QUIET, CLAP_PROCESS_ERROR, CLAP_PROCESS_TAIL, clap_process, clap_process_status}};
+use clap_sys::{events::{clap_input_events, clap_output_events}, ext::{audio_ports::CLAP_EXT_AUDIO_PORTS, draft::undo::{CLAP_EXT_UNDO, clap_host_undo}, gui::{CLAP_EXT_GUI, clap_host_gui}, latency::CLAP_EXT_LATENCY, note_ports::CLAP_EXT_NOTE_PORTS, params::{CLAP_EXT_PARAMS, clap_host_params}, render::CLAP_EXT_RENDER, state::{CLAP_EXT_STATE, clap_host_state}, tail::{CLAP_EXT_TAIL, clap_host_tail}, timer_support::{CLAP_EXT_TIMER_SUPPORT, clap_host_timer_support}}, host::clap_host, plugin::clap_plugin, process::{CLAP_PROCESS_CONTINUE, CLAP_PROCESS_CONTINUE_IF_NOT_QUIET, CLAP_PROCESS_ERROR, CLAP_PROCESS_TAIL, clap_process, clap_process_status}};
 use plinth_core::signals::{ptr_signal::{PtrSignal, PtrSignalMut}, signal::SignalMut};
 use raw_window_handle::RawWindowHandle;
 
 use crate::{Event, ParameterId, ProcessMode, ProcessState, Processor, ProcessorConfig, formats::PluginFormat, host::HostInfo};
-use crate::clap::{event::EventIterator, transport::convert_transport};
+use crate::clap::{event::{EventIterator, send_note_event_to_host}, transport::convert_transport};
 use crate::parameters::{info::ParameterInfo, has_duplicates, Parameters};
 
 use super::descriptor::Descriptor;
@@ -26,6 +26,34 @@ impl<P: ClapPlugin> Default for AudioThreadState<P> {
             active: false.into(),
             processor: Default::default(),
             tail: 0.into(),
+        }
+    }
+}
+
+/// Sends events from the processor's `output_events` to the host.
+pub(super) struct ClapOutputEvents {
+    out_events: *const clap_output_events,
+    has_note_output: bool,
+    max_sample_offset: usize,
+}
+
+impl ClapOutputEvents {
+    pub(super) fn new(out_events: *const clap_output_events, has_note_output: bool, frames_count: u32) -> Self {
+        let max_sample_offset = (frames_count as usize).saturating_sub(1);
+        Self { out_events, has_note_output, max_sample_offset }
+    }
+}
+
+impl Extend<Event> for ClapOutputEvents {
+    fn extend<T: IntoIterator<Item = Event>>(&mut self, iter: T) {
+        if !self.has_note_output {
+            if iter.into_iter().next().is_some() {
+                tracing::warn!("Dropping output event: Plugin::HAS_NOTE_OUTPUT is not enabled");
+            }
+            return;
+        }
+        for event in iter {
+            send_note_event_to_host(&event, self.out_events, self.max_sample_offset);
         }
     }
 }
@@ -346,11 +374,14 @@ impl<P: ClapPlugin> PluginInstance<P> {
                 Some(convert_transport(unsafe { &*process.transport }, instance.sample_rate))
             };
 
-            // Process events coming from the host and events coming from the editor
+            // Process events coming from the editor and events coming from the host.
+            // Editor events come first: they are all at sample offset 0 and get sent to the host
+            // while iterating, so this keeps them in time order with the processor's output events.
             let host_events = EventIterator::new(&instance.parameter_info, unsafe { &*process.in_events }, P::MIDI_CAPABILITIES, P::NOTE_EXPRESSIONS);
-            let events = host_events.chain(editor_events);
+            let input_events = editor_events.chain(host_events);
+            let output_events = &mut ClapOutputEvents::new(process.out_events, P::HAS_NOTE_OUTPUT, process.frames_count);
 
-            let result = match processor.process(&mut output, aux.as_ref(), transport, events) {
+            let result = match processor.process(&mut output, aux.as_ref(), transport, input_events, output_events) {
                 ProcessState::Error => CLAP_PROCESS_ERROR,
                 ProcessState::Normal => CLAP_PROCESS_CONTINUE_IF_NOT_QUIET,
                 ProcessState::Tail(tail) => {

@@ -2,7 +2,18 @@ use std::{ffi::{c_char, CStr}, marker::PhantomData, sync::atomic::Ordering};
 
 use clap_sys::{events::{clap_input_events, clap_output_events}, ext::params::{CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_HIDDEN, CLAP_PARAM_IS_MODULATABLE, CLAP_PARAM_IS_STEPPED, CLAP_PARAM_REQUIRES_PROCESS, clap_param_info, clap_plugin_params}, id::clap_id, plugin::clap_plugin};
 
-use crate::{Parameters, clap::{ClapPlugin, event::EventIterator, parameters::{map_parameter_value_from_clap, map_parameter_value_to_clap}, plugin_instance::PluginInstance}, parameters::info::ParameterInfo, processor::Processor, string::copy_str_to_char8};
+use crate::{Event, Parameters, clap::{ClapPlugin, event::EventIterator, parameters::{map_parameter_value_from_clap, map_parameter_value_to_clap}, plugin_instance::PluginInstance}, parameters::info::ParameterInfo, processor::Processor, string::copy_str_to_char8};
+
+/// Drop all output events: `flush` is meant for parameter changes only, and has no sample time context.
+struct FlushOutputEvents;
+
+impl Extend<Event> for FlushOutputEvents {
+    fn extend<I: IntoIterator<Item = Event>>(&mut self, iter: I) {
+        for event in iter {
+            tracing::debug!("Dropping output event in CLAP parameter flush: {event:?}");
+        }
+    }
+}
 
 #[repr(transparent)]
 pub struct Params<P: ClapPlugin> {
@@ -142,7 +153,8 @@ impl<P: ClapPlugin> Params<P> {
         PluginInstance::with_plugin_instance(plugin, |instance: &mut PluginInstance<P>| {
             let host_events = EventIterator::new(&instance.parameter_info, unsafe { &*in_events }, P::MIDI_CAPABILITIES, P::NOTE_EXPRESSIONS);
             let editor_events = instance.to_host_parameter_events.iter_and_send(&instance.parameter_info, out_events);
-            let all_events = host_events.chain(editor_events);
+            let input_events = host_events.chain(editor_events);
+            let output_events = &mut FlushOutputEvents;
 
             if instance.audio_thread_state.active.load(Ordering::Acquire) {
                 // Real-time safety: parking_lot Mutex is guaranteed to not do syscalls when uncontented
@@ -158,7 +170,7 @@ impl<P: ClapPlugin> Params<P> {
                 };
 
                 // When we have a processor, process events directly
-                processor.process_events(all_events);
+                processor.process_events(input_events, output_events);
                 drop(processor_ref);
 
                 // Also send them to the main thread
@@ -168,7 +180,7 @@ impl<P: ClapPlugin> Params<P> {
                 unsafe { ((*instance.host).request_callback.unwrap())(instance.host); }
             } else {
                 // When we don't have a processor, this is called from the main thread so we can process events directly
-                for event in all_events {
+                for event in input_events {
                     instance.process_plugin_event(&event);
                 }
             }

@@ -124,6 +124,11 @@ impl NoteExpressionDescriptor {
         value * VOLUME_RANGE_GAIN
     }
 
+    /// Maps a linear gain in [0, 4] back to a normalized [0, 1] volume value.
+    pub fn gain_to_normalized(gain: f64) -> NoteExpressionValue {
+        (gain / VOLUME_RANGE_GAIN).clamp(0.0, 1.0)
+    }
+
     /// Maps a normalized [0, 1] volume value to dB. Returns -inf for silence.
     pub fn normalized_to_db(value: NoteExpressionValue) -> f64 {
         20.0 * Self::normalized_to_gain(value).log10()
@@ -131,7 +136,7 @@ impl NoteExpressionDescriptor {
 
     /// Maps dB back to a normalized [0, 1] volume value.
     pub fn db_to_normalized(db: f64) -> NoteExpressionValue {
-        (10f64.powf(db / 20.0) / VOLUME_RANGE_GAIN).clamp(0.0, 1.0)
+        Self::gain_to_normalized(10f64.powf(db / 20.0))
     }
 
     /// Maps a normalized [0, 1] tuning value to a +- semitones value.
