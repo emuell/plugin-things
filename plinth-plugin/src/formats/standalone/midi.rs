@@ -64,37 +64,37 @@ pub fn connect_inputs(
 
 fn parse_midi(data: &[u8]) -> Option<Event> {
     if data.len() < 2 {
+        // ignore all 1-byte real-time messages
         return None;
     }
 
     let status = data[0] & 0xF0;
     let channel = (data[0] & 0x0F) as i16;
-    let key = data[1] as i16;
-    let velocity = if data.len() >= 3 {
-        data[2] as f64 / 127.0
-    } else {
-        0.0
-    };
 
     match status {
         0x90 if data.len() >= 3 && data[2] > 0 => Some(Event::NoteOn {
             sample_offset: 0,
             channel,
-            key,
+            key: data[1] as i16,
             note: -1,
-            velocity,
+            velocity: data[2] as f64 / 127.0,
         }),
         0x80 | 0x90 => Some(Event::NoteOff {
             sample_offset: 0,
             channel,
-            key,
+            key: data[1] as i16,
             note: -1,
-            velocity,
+            velocity: if status == 0x80 && data.len() >= 3 {
+                data[2] as f64 / 127.0
+            } else {
+                0.0
+            },
         }),
         0xE0 if data.len() >= 3 => {
             let lsb = data[1] as i16;
             let msb = data[2] as i16;
             let bend = (msb << 7 | lsb) - 8192;
+            // assuming +-2 semitone range
             let semitones = bend as f64 / 8192.0 * 2.0;
             Some(Event::PitchBend {
                 sample_offset: 0,
@@ -104,6 +104,13 @@ fn parse_midi(data: &[u8]) -> Option<Event> {
                 semitones,
             })
         }
-        _ => None,
+        _ => Some(Event::Midi {
+            sample_offset: 0,
+            data: [
+                data[0], //
+                data[1],
+                if data.len() > 2 { data[2] } else { 0 },
+            ],
+        }),
     }
 }

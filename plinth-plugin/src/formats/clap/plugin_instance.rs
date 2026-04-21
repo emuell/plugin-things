@@ -1,12 +1,12 @@
 use std::{collections::BTreeMap, ffi::{CStr, c_char, c_void}, iter::zip, ptr::{null, null_mut}, sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}}};
 
-use clap_sys::{events::clap_input_events, ext::{audio_ports::CLAP_EXT_AUDIO_PORTS, draft::undo::{CLAP_EXT_UNDO, clap_host_undo}, gui::{CLAP_EXT_GUI, clap_host_gui}, latency::CLAP_EXT_LATENCY, note_ports::CLAP_EXT_NOTE_PORTS, params::{CLAP_EXT_PARAMS, clap_host_params}, render::CLAP_EXT_RENDER, state::{CLAP_EXT_STATE, clap_host_state}, tail::{CLAP_EXT_TAIL, clap_host_tail}, timer_support::{CLAP_EXT_TIMER_SUPPORT, clap_host_timer_support}}, host::clap_host, plugin::clap_plugin, process::{CLAP_PROCESS_CONTINUE, CLAP_PROCESS_CONTINUE_IF_NOT_QUIET, CLAP_PROCESS_ERROR, CLAP_PROCESS_TAIL, clap_process, clap_process_status}};
+use clap_sys::{events::{clap_input_events, clap_output_events}, ext::{audio_ports::CLAP_EXT_AUDIO_PORTS, draft::undo::{CLAP_EXT_UNDO, clap_host_undo}, gui::{clap_host_gui, CLAP_EXT_GUI}, latency::CLAP_EXT_LATENCY, note_ports::CLAP_EXT_NOTE_PORTS, params::{clap_host_params, CLAP_EXT_PARAMS}, render::CLAP_EXT_RENDER, state::{clap_host_state, CLAP_EXT_STATE}, tail::{clap_host_tail, CLAP_EXT_TAIL}, timer_support::{clap_host_timer_support, CLAP_EXT_TIMER_SUPPORT}}, host::clap_host, plugin::clap_plugin, process::{clap_process, clap_process_status, CLAP_PROCESS_CONTINUE, CLAP_PROCESS_CONTINUE_IF_NOT_QUIET, CLAP_PROCESS_ERROR, CLAP_PROCESS_TAIL}};
 use tracing::error;
 use plinth_core::signals::{ptr_signal::{PtrSignal, PtrSignalMut}, signal::SignalMut};
 use raw_window_handle::RawWindowHandle;
 
 use crate::{formats::PluginFormat, host::HostInfo, Event, ParameterId, ProcessMode, ProcessState, Processor, ProcessorConfig};
-use crate::clap::{event::EventIterator, transport::convert_transport};
+use crate::clap::{event::{send_note_event_to_host, EventIterator}, transport::convert_transport};
 use crate::parameters::{info::ParameterInfo, has_duplicates, Parameters};
 
 use super::descriptor::Descriptor;
@@ -27,6 +27,28 @@ impl<P: ClapPlugin> Default for AudioThreadState<P> {
             active: false.into(),
             processor: Default::default(),
             tail: 0.into(),
+        }
+    }
+}
+
+pub(super) struct ClapOutputEvents {
+    out_events: *const clap_output_events,
+    has_note_output: bool,
+}
+
+impl ClapOutputEvents {
+    pub(super) fn new(out_events: *const clap_output_events, has_note_output: bool) -> Self {
+        Self { out_events, has_note_output }
+    }
+}
+
+impl Extend<Event> for ClapOutputEvents {
+    fn extend<T: IntoIterator<Item = Event>>(&mut self, iter: T) {
+        if !self.has_note_output {
+            return;
+        }
+        for event in iter {
+            send_note_event_to_host(&event, self.out_events);
         }
     }
 }
@@ -337,9 +359,10 @@ impl<P: ClapPlugin> PluginInstance<P> {
 
             // Process events coming from the host and events coming from the editor
             let host_events = EventIterator::new(&instance.parameter_info, unsafe { &*process.in_events });
-            let events = host_events.chain(editor_events);
+            let input_events = host_events.chain(editor_events);
+            let output_events = &mut ClapOutputEvents::new(process.out_events, P::HAS_NOTE_OUTPUT);
 
-            let result = match processor.process(&mut output, aux.as_ref(), transport, events) {
+            let result = match processor.process(&mut output, aux.as_ref(), transport, input_events, output_events) {
                 ProcessState::Error => CLAP_PROCESS_ERROR,
                 ProcessState::Normal => CLAP_PROCESS_CONTINUE_IF_NOT_QUIET,
                 ProcessState::Tail(tail) => {

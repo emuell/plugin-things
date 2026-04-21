@@ -47,6 +47,46 @@ impl Iterator for EventIterator<'_> {
                     });
                 },
 
+                AURenderEventType::AURenderEventMIDI => {
+                    let midi_event = unsafe { &next_event.midi };
+
+                    let sample_offset = i64::max(0, midi_event.event_sample_time) as usize;
+                    let data = midi_event.data;
+                    let status = data[0] & 0xF0;
+                    let channel = (data[0] & 0x0F) as i16;
+
+                    let event = match status {
+                        0x90 if data[2] > 0 => Event::NoteOn {
+                            sample_offset,
+                            channel,
+                            key: data[1] as i16,
+                            note: -1,
+                            velocity: data[2] as f64 / 127.0,
+                        },
+                        0x80 | 0x90 => Event::NoteOff {
+                            sample_offset,
+                            channel,
+                            key: data[1] as i16,
+                            note: -1,
+                            velocity: data[2] as f64 / 127.0,
+                        },
+                        0xE0 => {
+                            let bend = ((data[2] as u16) << 7 | data[1] as u16) as f64;
+                            Event::PitchBend {
+                                sample_offset,
+                                channel,
+                                key: -1,
+                                note: -1,
+                                // assuming +-2 semitone default sensitivity
+                                semitones: (bend - 8192.0) / 8192.0 * 2.0,
+                            }
+                        },
+                        _ => Event::Midi { sample_offset, data },
+                    };
+
+                    return Some(event);
+                },
+
                 _ => {}
             }
         }

@@ -14,6 +14,54 @@ use super::{parameter_multiplier, parameters::CachedParameter, AURenderEvent, Au
 
 const MAX_EVENTS: usize = 1024 * 10;
 
+type MidiOutputFn = unsafe extern "C-unwind" fn(*mut c_void, i64, i32, *const u8);
+
+struct Auv3OutputEvents {
+    output_fn: Option<MidiOutputFn>,
+    output_fn_context: *mut c_void,
+}
+
+impl Auv3OutputEvents {
+    fn new(
+        output_fn: Option<MidiOutputFn>,
+        output_fn_context: *mut c_void,
+    ) -> Self {
+        Self { output_fn, output_fn_context }
+    }
+}
+
+impl Extend<Event> for Auv3OutputEvents {
+    fn extend<I: IntoIterator<Item = Event>>(&mut self, iter: I) {
+        let Some(output_fn) = self.output_fn else {
+            return;
+        };
+
+        for event in iter {
+            let (sample_time, len, data) = match event {
+                Event::NoteOn { sample_offset, channel, key, velocity, .. } => {
+                    let data = [0x90 | (channel as u8 & 0x0F), key as u8, (velocity * 127.0).round() as u8];
+                    (sample_offset as i64, 3i32, data)
+                }
+                Event::NoteOff { sample_offset, channel, key, velocity, .. } => {
+                    let data = [0x80 | (channel as u8 & 0x0F), key as u8, (velocity * 127.0).round() as u8];
+                    (sample_offset as i64, 3i32, data)
+                }
+                Event::PitchBend { sample_offset, channel, semitones, .. } => {
+                    // assuming +-2 semitone default sensitivity
+                    let bend = ((semitones / 2.0) * 8192.0 + 8192.0).clamp(0.0, 16383.0) as u16;
+                    let data = [0xE0 | (channel as u8 & 0x0F), (bend & 0x7F) as u8, ((bend >> 7) & 0x7F) as u8];
+                    (sample_offset as i64, 3i32, data)
+                }
+                Event::Midi { sample_offset, data } => {
+                    (sample_offset as i64, 3i32, data)
+                }
+                _ => continue,
+            };
+            unsafe { output_fn(self.output_fn_context, sample_time, len, data.as_ptr()) };
+        }
+    }
+}
+
 pub struct Auv3Wrapper<P: Auv3Plugin> {
     plugin: Mutex<P>,
     processor: Option<P::Processor>,
@@ -348,6 +396,8 @@ impl<P: Auv3Plugin> Auv3Wrapper<P> {
         tempo: f64,
         position_samples: i64,
         first_event: *const AURenderEvent,
+        midi_output_fn: Option<MidiOutputFn>,
+        midi_output_fn_context: *mut c_void,
     ) {
         assert_eq!(channels, 2);
 
@@ -372,11 +422,15 @@ impl<P: Auv3Plugin> Auv3Wrapper<P> {
         let processor = self.processor.as_mut().unwrap();
 
         let event_count = self.events_to_processor_receiver.slots();
+        let output_events = &mut Auv3OutputEvents::new(midi_output_fn, midi_output_fn_context);
+
         if event_count > 0 {
-            processor.process_events(self.events_to_processor_receiver.read_chunk(event_count).unwrap().into_iter());
+            let input_events = self.events_to_processor_receiver.read_chunk(event_count).unwrap().into_iter();
+            processor.process_events(input_events, output_events);
         }
 
         let transport = Transport::new(playing, tempo, position_samples);
+        let input_events = &mut EventIterator::new(first_event, &self.parameter_ids);
 
         if let (Some(input), Some(output)) = (input.as_ref(), output.as_mut()) {
             for ptr in input.pointers().iter() {
@@ -398,24 +452,25 @@ impl<P: Auv3Plugin> Auv3Wrapper<P> {
                 output,
                 aux.as_ref(),
                 Some(transport),
-                &mut EventIterator::new(first_event, &self.parameter_ids));
+                input_events,
+                output_events,
+            );
 
-                let tail_length_samples = match state {
-                    ProcessState::Error => {
-                        tracing::error!("Processing error");
-                        0
-                    },
+            let tail_length_samples = match state {
+                ProcessState::Error => {
+                    tracing::error!("Processing error");
+                    0
+                },
+                ProcessState::Normal => 0,
+                ProcessState::Tail(tail) => tail,
+                ProcessState::KeepAlive => usize::MAX,
+            };
 
-                    ProcessState::Normal => 0,
-                    ProcessState::Tail(tail) => tail,
-                    ProcessState::KeepAlive => usize::MAX,
-                };
-
-                let sample_rate = self.sample_rate.load(::std::sync::atomic::Ordering::Acquire);
-                let tail_length_seconds = tail_length_samples as f64 / sample_rate;
-                self.tail_length_seconds.store(tail_length_seconds, ::std::sync::atomic::Ordering::Release);
+            let sample_rate = self.sample_rate.load(::std::sync::atomic::Ordering::Acquire);
+            let tail_length_seconds = tail_length_samples as f64 / sample_rate;
+            self.tail_length_seconds.store(tail_length_seconds, ::std::sync::atomic::Ordering::Release);
         } else {
-            processor.process_events(&mut EventIterator::new(first_event, &self.parameter_ids));
+            processor.process_events(input_events, output_events);
         };
     }
 }

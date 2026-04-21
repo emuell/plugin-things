@@ -33,6 +33,18 @@ pub enum Event {
         semitones: f64,
     },
 
+    /// Raw 3-byte MIDI message.
+    /// 
+    /// Note events never will be *received* as `Midi` event but as dedicated `NoteOn`, `NoteOff` or `Pitchbend` event.
+    ///
+    /// Note: VST3 maps `Midi` events via `LegacyMIDICCOutEvent` which only supports the following status bytes:
+    /// `0xB0` Control Change, `0xC0` Program Change, `0xD0` Channel Pressure, `0xE0` Pitch Bend.
+    /// Other MIDI events will silently be dropped. CLAP and AU pass the raw bytes through unchanged.
+    Midi {
+        sample_offset: usize,
+        data: [u8; 3],
+    },
+
     // Parameter events
     StartParameterChange {
         id: ParameterId,
@@ -56,6 +68,22 @@ pub enum Event {
 }
 
 impl Event {
+    pub fn midi_control_change(sample_offset: usize, channel: u8, controller: u8, value: u8) -> Self {
+        Self::Midi { sample_offset, data: [0xB0 | (channel & 0x0F), controller, value] }
+    }
+
+    pub fn midi_pitch_bend(sample_offset: usize, channel: u8, lsb: u8, msb: u8) -> Self {
+        Self::Midi { sample_offset, data: [0xE0 | (channel & 0x0F), lsb, msb] }
+    }
+
+    pub fn midi_channel_pressure(sample_offset: usize, channel: u8, pressure: u8) -> Self {
+        Self::Midi { sample_offset, data: [0xD0 | (channel & 0x0F), pressure, 0] }
+    }
+
+    pub fn midi_program_change(sample_offset: usize, channel: u8, program: u8) -> Self {
+        Self::Midi { sample_offset, data: [0xC0 | (channel & 0x0F), program, 0] }
+    }
+
     pub fn split_signal_at_events<I, S>(signal: &mut S, events: I) -> SignalSplitter<'_, I, S>
     where
         I: Iterator<Item = Event>,
@@ -69,6 +97,7 @@ impl Event {
             Event::NoteOn { sample_offset, .. } => *sample_offset,
             Event::NoteOff { sample_offset, .. } => *sample_offset,
             Event::PitchBend { sample_offset, .. } => *sample_offset,
+            Event::Midi { sample_offset, .. } => *sample_offset,
             Event::ParameterValue { sample_offset, .. } => *sample_offset,
             Event::ParameterModulation { sample_offset, .. } => *sample_offset,
 

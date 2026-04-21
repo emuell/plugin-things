@@ -34,6 +34,8 @@ void plinth_auv3_activate(void* wrapper, double sampleRate, uint64_t maxBlockSiz
 void plinth_auv3_deactivate(void* wrapper);
 
 bool plinth_auv3_has_aux_bus();
+bool plinth_auv3_has_note_output();
+
 double plinth_auv3_tail_length(void* wrapper);
 
 void plinth_auv3_process(
@@ -46,7 +48,9 @@ void plinth_auv3_process(
     bool playing,
     double tempo,
     int64_t positionSamples,
-    const union AURenderEvent *firstEvent
+    const union AURenderEvent *firstEvent,
+    void (*send_midi_event)(void* context, uint64_t sample_offset, uint16_t data_len, const uint8_t* data),
+    void* send_midi_event_context
 );
 
 // Parameter interface

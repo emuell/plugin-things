@@ -52,6 +52,12 @@ macro_rules! export_auv3 {
         }
 
         #[unsafe(no_mangle)]
+        unsafe extern "C-unwind" fn plinth_auv3_has_note_output() -> bool {
+            log::trace!("plinth_auv3_has_note_output() from thread {:?}", std::thread::current().id());
+            <$plugin>::HAS_NOTE_OUTPUT
+        }
+
+        #[unsafe(no_mangle)]
         unsafe extern "C-unwind" fn plinth_auv3_process(
             wrapper: *mut ::std::ffi::c_void,
             input: *const *const f32,
@@ -63,11 +69,13 @@ macro_rules! export_auv3 {
             tempo: f64,
             position_samples: i64,
             first_event: *const ::plinth_plugin::auv3::AURenderEvent,
+            midi_output_fn: Option<unsafe extern "C-unwind" fn(*mut ::std::ffi::c_void, i64, i32, *const u8)>,
+            midi_output_fn_context: *mut ::std::ffi::c_void,
         ) {
             tracing::trace!("plinth_auv3_process() from thread {:?}", std::thread::current().id());
 
             ::plinth_plugin::auv3::Auv3Wrapper::<$plugin>::with_wrapper(wrapper, |wrapper| {
-                unsafe { wrapper.process(input, aux, output, channels, frames, playing, tempo, position_samples, first_event ) };
+                unsafe { wrapper.process(input, aux, output, channels, frames, playing, tempo, position_samples, first_event,  midi_output_fn, midi_output_fn_context) };
             });
         }
 

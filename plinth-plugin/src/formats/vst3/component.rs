@@ -12,12 +12,13 @@ use vst3::Steinberg::Vst::ControllerNumbers_::kPitchBend;
 use vst3::Steinberg::Vst::{CtrlNumber, IMidiMapping, IMidiMappingTrait};
 use vst3::{ComPtr, ComRef};
 use vst3::Steinberg::{int16, int32, kInvalidArgument, kNoInterface, kResultFalse, kResultOk, kResultTrue, tresult, uint32, FIDString, FUnknown, IBStream, IPlugView, IPluginBaseTrait, TBool, TUID};
-use vst3::Steinberg::Vst::{kInfiniteTail, kNoParentUnitId, kNoProgramListId, kNoTail, BusDirection, BusDirections_, BusInfo, BusInfo_::BusFlags_, BusTypes_, CString, IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentHandler, IComponentTrait, IEditController, IEditController2, IEditController2Trait, IEditControllerTrait, IHostApplication, IHostApplicationTrait, IProcessContextRequirements, IProcessContextRequirementsTrait, IProcessContextRequirements_, IUnitInfo, IUnitInfoTrait, IoMode, IoModes_, KnobMode, MediaType, MediaTypes_, ParamID, ParamValue, ParameterInfo_, ProcessData, ProcessSetup, ProgramListID, ProgramListInfo, RoutingInfo, SpeakerArr, SpeakerArrangement, String128, SymbolicSampleSizes_, TChar, UnitID, UnitInfo, ViewType::kEditor};
+use vst3::Steinberg::Vst::{kInfiniteTail, kNoParentUnitId, kNoProgramListId, kNoTail, BusDirection, BusDirections_, BusInfo, BusInfo_::BusFlags_, BusTypes_, CString, IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentHandler, IComponentTrait, IEditController, IEditController2, IEditController2Trait, IEditControllerTrait, IEventList, IEventListTrait, IHostApplication, IHostApplicationTrait, IProcessContextRequirements, IProcessContextRequirementsTrait, IProcessContextRequirements_, IUnitInfo, IUnitInfoTrait, IoMode, IoModes_, KnobMode, MediaType, MediaTypes_, ParamID, ParamValue, ParameterInfo_, ProcessData, ProcessSetup, ProgramListID, ProgramListInfo, RoutingInfo, SpeakerArr, SpeakerArrangement, String128, SymbolicSampleSizes_, TChar, UnitID, UnitInfo, ViewType::kEditor};
 use widestring::U16CStr;
 
+use crate::event::Event;
 use crate::formats::PluginFormat;
 use crate::host::HostInfo;
-use crate::vst3::parameters::parameter_change_to_event;
+use crate::vst3::{parameters::parameter_change_to_event, event::event_to_vst3_event};
 use crate::{ParameterId, Parameters, ProcessMode, ProcessState, Processor, ProcessorConfig};
 use crate::editor::NoEditor;
 use crate::parameters::{group::{self, ParameterGroupRef}, has_duplicates, info::ParameterInfo};
@@ -40,6 +41,30 @@ impl<P: Vst3Plugin> Default for AudioThreadState<P> {
         Self {
             processor: Default::default(),
             aux_active: true.into(),
+        }
+    }
+}
+
+struct Vst3OutputEventList<'a>(Option<ComRef<'a, IEventList>>);
+
+impl<'a> Vst3OutputEventList<'a> {
+    fn new(ptr: *mut IEventList, has_note_output: bool) -> Self {
+        Self(if has_note_output && !ptr.is_null() {
+            unsafe { ComRef::from_raw(ptr) }
+        } else {
+            None
+        })
+    }
+}
+
+impl Extend<Event> for Vst3OutputEventList<'_> {
+    fn extend<T: IntoIterator<Item = Event>>(&mut self, iter: T) {
+        if let Some(event_list) = &self.0 {
+            for event in iter {
+                if let Some(mut vst3_event) = event_to_vst3_event(&event) {
+                    unsafe { event_list.addEvent(&mut vst3_event) };
+                }
+            }
         }
     }
 }
@@ -282,9 +307,6 @@ impl<P: Vst3Plugin> IAudioProcessorTrait for PluginComponent<P> {
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
         let data = unsafe { &mut *data };
 
-        let parameter_change_iterator = ParameterChangeIterator::new(data.inputParameterChanges, *self.pitch_bend_parameter_ids.borrow());
-        let event_iterator = EventIterator::new(data.inputEvents);
-        let all_events = event_iterator.chain(parameter_change_iterator);
         let is_data_dump = data.inputs.is_null() || data.outputs.is_null() || data.numInputs == 0 || data.numSamples == 0;
 
         // On some platforms, this cast is needed
@@ -332,8 +354,14 @@ impl<P: Vst3Plugin> IAudioProcessorTrait for PluginComponent<P> {
             return kResultFalse;
         };
 
+        let parameter_change_iterator = ParameterChangeIterator::new(data.inputParameterChanges, *self.pitch_bend_parameter_ids.borrow());
+        let event_iterator = EventIterator::new(data.inputEvents);
+        
+        let input_events = event_iterator.chain(parameter_change_iterator);
+        let output_events = &mut Vst3OutputEventList::new(data.outputEvents, P::HAS_NOTE_OUTPUT);
+
         if is_data_dump {
-            processor.process_events(all_events);
+            processor.process_events(input_events, output_events);
             return kResultOk;
         }
 
@@ -353,7 +381,7 @@ impl<P: Vst3Plugin> IAudioProcessorTrait for PluginComponent<P> {
             Some(unsafe { &*data.processContext }.into())
         };
 
-        let process_state = processor.process(&mut main_output, aux_input.as_ref(), transport, all_events);
+        let process_state = processor.process(&mut main_output, aux_input.as_ref(), transport, input_events, output_events);
 
         let tail_length = match process_state {
             ProcessState::Error => {
@@ -403,11 +431,24 @@ impl<P: Vst3Plugin> IComponentTrait for PluginComponent<P> {
 
         // On some platforms, these casts are needed
         #[allow(clippy::unnecessary_cast)]
-        if P::HAS_AUX_INPUT && media_type == MediaTypes_::kAudio as i32 && dir == BusDirections_::kInput as i32 {
-            2
-        } else {
-            1
+        if media_type == MediaTypes_::kEvent as i32 {
+            if dir == BusDirections_::kInput as i32 {
+                return if P::HAS_NOTE_INPUT { 1 } else { 0 };
+            }
+            else {
+                return if P::HAS_NOTE_OUTPUT { 1 } else { 0 };
+            }
         }
+        else if media_type == MediaTypes_::kAudio as i32 {
+            if dir == BusDirections_::kInput as i32 {
+                return if P::HAS_AUX_INPUT { 2 } else { 1 };
+            }
+            else {
+               return 1;
+            }
+        }
+
+        0 // everything else is unexpected
     }
 
     unsafe fn getBusInfo(&self, media_type: MediaType, dir: BusDirection, index: int32, bus: *mut BusInfo) -> tresult {
