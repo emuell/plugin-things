@@ -14,7 +14,6 @@ struct StandaloneRunner<P: StandalonePlugin> {
     editor: P::Editor,
     to_plugin_receiver: mpsc::Receiver<Event>,
     title: &'static str,
-    size: (f64, f64),
     window: Option<Window>,
     last_frame: Instant,
     audio_stream: Stream,
@@ -31,9 +30,10 @@ impl<P: StandalonePlugin> Drop for StandaloneRunner<P> {
 impl<P: StandalonePlugin> ApplicationHandler for StandaloneRunner<P> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // Create new window
+        let (default_width, default_height) = P::Editor::DEFAULT_SIZE;
         let attrs = WindowAttributes::default()
             .with_title(self.title)
-            .with_inner_size(winit::dpi::LogicalSize::new(self.size.0, self.size.1))
+            .with_inner_size(winit::dpi::LogicalSize::new(default_width, default_height))
             .with_resizable(self.editor.can_resize());
 
         let window = match event_loop.create_window(attrs) {
@@ -49,8 +49,12 @@ impl<P: StandalonePlugin> ApplicationHandler for StandaloneRunner<P> {
         if !cfg!(target_os = "macos") {
             // On macOS the system's DPI scale already is applied in the plugin view
             self.editor.set_scale(window.scale_factor());
+            // Resize window, in case editor uses a custom scaling factor
+            let new_size = winit::dpi::PhysicalSize::<u32>::from(self.editor.window_size());
+            if window.request_inner_size(new_size).is_some_and(|applied_size| applied_size != new_size) {
+                tracing::warn!("Failed to apply new standalone editor window size");
+            }
         }
-        self.size = self.editor.window_size();
 
         // Attach editor to the window
         let handle = window
@@ -79,6 +83,13 @@ impl<P: StandalonePlugin> ApplicationHandler for StandaloneRunner<P> {
             if !cfg!(target_os = "macos") {
                 // see `resumed`impl
                 self.editor.set_scale(scale_factor);
+                // apply new window size, if needed
+                if let Some(window) = &self.window {
+                    let new_size = winit::dpi::PhysicalSize::<u32>::from(self.editor.window_size());
+                    if window.request_inner_size(new_size).is_some_and(|applied_size| applied_size != new_size) {
+                        tracing::warn!("Failed to apply new standalone editor window size");
+                    }
+                }
             }
         }
     }
@@ -154,7 +165,7 @@ pub fn run_standalone_with_config<P: StandalonePlugin + 'static>(
         format: PluginFormat::Standalone,
     };
 
-    let mut plugin = P::new(host_info);
+    let plugin = P::new(host_info);
 
     // Parameter event map (shared between host and audio thread)
     let parameter_event_map =
@@ -268,7 +279,6 @@ pub fn run_standalone_with_config<P: StandalonePlugin + 'static>(
         editor,
         to_plugin_receiver,
         title: P::NAME,
-        size: P::Editor::DEFAULT_SIZE,
         window: None,
         last_frame: Instant::now(),
         audio_stream,
