@@ -177,7 +177,7 @@ pub fn run_standalone_with_config<P: StandalonePlugin + 'static>(
 
     // Open MIDI connections if plugin accepts note inputs
     let midi_connections = if P::HAS_NOTE_INPUT {
-        midi::connect_inputs(&midi_config, midi_sender)
+        midi::connect_inputs(&midi_config, midi_sender, P::MIDI_CAPABILITIES)
     } else {
         vec![]
     };

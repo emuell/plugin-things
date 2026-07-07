@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use clap_sys::{ext::note_ports::{clap_note_port_info, clap_plugin_note_ports, CLAP_NOTE_DIALECT_CLAP}, plugin::clap_plugin};
+use clap_sys::{ext::note_ports::{clap_note_port_info, clap_plugin_note_ports, CLAP_NOTE_DIALECT_CLAP, CLAP_NOTE_DIALECT_MIDI}, plugin::clap_plugin};
 
 use crate::{clap::ClapPlugin, string::copy_str_to_char8};
 
@@ -43,7 +43,7 @@ impl<P: ClapPlugin> NotePorts<P> {
     unsafe extern "C" fn get(
         _plugin: *const clap_plugin,
         index: u32,
-        _is_input: bool,
+        is_input: bool,
         info: *mut clap_note_port_info,
     ) -> bool
     {
@@ -51,6 +51,9 @@ impl<P: ClapPlugin> NotePorts<P> {
 
         info.id = index;
         info.supported_dialects = CLAP_NOTE_DIALECT_CLAP;
+        if is_input && !P::MIDI_CAPABILITIES.is_empty() {
+            info.supported_dialects |= CLAP_NOTE_DIALECT_MIDI;
+        }
         info.preferred_dialect = CLAP_NOTE_DIALECT_CLAP;
         copy_str_to_char8("Main", &mut info.name);
 

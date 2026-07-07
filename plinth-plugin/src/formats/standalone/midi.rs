@@ -3,11 +3,14 @@ use std::sync::mpsc::Sender;
 use midir::{MidiInput, MidiInputConnection};
 
 use super::config::MidiInputConfig;
-use crate::Event;
+use crate::formats::midi::parse_midi_event;
+use crate::{Event, MidiCapabilities};
 
+/// Connect MIDI input ports and translate raw MIDI bytes into `Event`s, filtered by `capabilities`. Each enabled port gets its own `MidiInputConnection`.
 pub fn connect_inputs(
     config: &MidiInputConfig,
     sender: Sender<Event>,
+    capabilities: MidiCapabilities,
 ) -> Vec<MidiInputConnection<()>> {
     let midi_in = match MidiInput::new("plinth-standalone") {
         Ok(m) => m,
@@ -45,7 +48,7 @@ pub fn connect_inputs(
             port,
             "plinth-midi-input",
             move |_timestamp, data, _| {
-                if let Some(event) = parse_midi(data) {
+                if let Some(event) = parse_midi_event(data, 0, capabilities) {
                     let _ = sender.send(event);
                 }
             },
@@ -60,50 +63,4 @@ pub fn connect_inputs(
     }
 
     connections
-}
-
-fn parse_midi(data: &[u8]) -> Option<Event> {
-    if data.len() < 2 {
-        return None;
-    }
-
-    let status = data[0] & 0xF0;
-    let channel = (data[0] & 0x0F) as i16;
-    let key = data[1] as i16;
-    let velocity = if data.len() >= 3 {
-        data[2] as f64 / 127.0
-    } else {
-        0.0
-    };
-
-    match status {
-        0x90 if data.len() >= 3 && data[2] > 0 => Some(Event::NoteOn {
-            sample_offset: 0,
-            channel,
-            key,
-            note: -1,
-            velocity,
-        }),
-        0x80 | 0x90 => Some(Event::NoteOff {
-            sample_offset: 0,
-            channel,
-            key,
-            note: -1,
-            velocity,
-        }),
-        0xE0 if data.len() >= 3 => {
-            let lsb = data[1] as i16;
-            let msb = data[2] as i16;
-            let bend = (msb << 7 | lsb) - 8192;
-            let semitones = bend as f64 / 8192.0 * 2.0;
-            Some(Event::PitchBend {
-                sample_offset: 0,
-                channel,
-                key: -1,
-                note: -1,
-                semitones,
-            })
-        }
-        _ => None,
-    }
 }

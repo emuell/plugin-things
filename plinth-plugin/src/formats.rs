@@ -3,6 +3,7 @@ use std::fmt::Display;
 #[cfg(target_os="macos")]
 pub mod auv3;
 pub mod clap;
+pub mod midi;
 #[cfg(feature = "standalone")]
 pub mod standalone;
 pub mod vst3;

@@ -8,8 +8,10 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use plinth_core::signals::ptr_signal::{PtrSignal, PtrSignalMut};
 use plinth_core::signals::signal::SignalMut;
-use vst3::Steinberg::Vst::ControllerNumbers_::kPitchBend;
-use vst3::Steinberg::Vst::{CtrlNumber, IMidiMapping, IMidiMappingTrait};
+use vst3::Steinberg::Vst::ControllerNumbers_::{kAfterTouch, kCtrlProgramChange, kPitchBend};
+use vst3::Steinberg::Vst::NoteExpressionTypeIDs_::{kBrightnessTypeID, kExpressionTypeID, kInvalidTypeID, kPanTypeID, kTuningTypeID, kVibratoTypeID, kVolumeTypeID};
+use vst3::Steinberg::Vst::PhysicalUITypeIDs_::{kPUIPressure, kPUIXMovement, kPUIYMovement};
+use vst3::Steinberg::Vst::{CtrlNumber, IMidiMapping, IMidiMappingTrait, INoteExpressionController, INoteExpressionControllerTrait, INoteExpressionPhysicalUIMapping, INoteExpressionPhysicalUIMappingTrait, NoteExpressionTypeID, NoteExpressionTypeInfo, NoteExpressionValue, PhysicalUIMapList};
 use vst3::{ComPtr, ComRef};
 use vst3::Steinberg::{int16, int32, kInvalidArgument, kNoInterface, kResultFalse, kResultOk, kResultTrue, tresult, uint32, FIDString, FUnknown, IBStream, IPlugView, IPluginBaseTrait, TBool, TUID};
 use vst3::Steinberg::Vst::{kInfiniteTail, kNoParentUnitId, kNoProgramListId, kNoTail, BusDirection, BusDirections_, BusInfo, BusInfo_::BusFlags_, BusTypes_, CString, IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentHandler, IComponentTrait, IEditController, IEditController2, IEditController2Trait, IEditControllerTrait, IHostApplication, IHostApplicationTrait, IProcessContextRequirements, IProcessContextRequirementsTrait, IProcessContextRequirements_, IUnitInfo, IUnitInfoTrait, IoMode, IoModes_, KnobMode, MediaType, MediaTypes_, ParamID, ParamValue, ParameterInfo_, ProcessData, ProcessSetup, ProgramListID, ProgramListInfo, RoutingInfo, SpeakerArr, SpeakerArrangement, String128, SymbolicSampleSizes_, TChar, UnitID, UnitInfo, ViewType::kEditor};
@@ -17,12 +19,12 @@ use widestring::U16CStr;
 
 use crate::formats::PluginFormat;
 use crate::host::HostInfo;
-use crate::vst3::parameters::parameter_change_to_event;
-use crate::{ParameterId, Parameters, ProcessMode, ProcessState, Processor, ProcessorConfig};
+use crate::vst3::parameters::{parameter_change_to_event, MidiParameterIds};
+use crate::{NoteExpressions, ParameterId, Parameters, ProcessMode, ProcessState, Processor, ProcessorConfig};
 use crate::editor::NoEditor;
 use crate::parameters::{group::{self, ParameterGroupRef}, has_duplicates, info::ParameterInfo};
 use crate::string::{char16_to_string, copy_str_to_char16};
-use crate::vst3::{event::EventIterator, parameters::ParameterChangeIterator};
+use crate::vst3::{event::{EventIterator, NoteIdMap}, parameters::ParameterChangeIterator};
 
 use super::{plugin::Vst3Plugin, stream::Stream, view::View};
 
@@ -49,7 +51,8 @@ pub struct PluginComponent<P: Vst3Plugin> {
 
     parameter_info: RefCell<Vec<ParameterInfo>>,
     parameter_groups: RefCell<Vec<ParameterGroupRef>>,
-    pitch_bend_parameter_ids: RefCell<[ParameterId; 16]>,
+    midi_parameter_ids: RefCell<MidiParameterIds>,
+    note_id_map: RefCell<NoteIdMap>,
 
     process_mode: RefCell<ProcessMode>,
     processing: AtomicBool,
@@ -67,7 +70,8 @@ impl<P: Vst3Plugin + 'static> PluginComponent<P> {
 
             parameter_info: Default::default(),
             parameter_groups: Default::default(),
-            pitch_bend_parameter_ids: Default::default(),
+            midi_parameter_ids: Default::default(),
+            note_id_map: Default::default(),
 
             process_mode: ProcessMode::default().into(),
             processing: AtomicBool::new(false),
@@ -92,7 +96,7 @@ impl<P: Vst3Plugin + 'static> PluginComponent<P> {
 }
 
 impl<P: Vst3Plugin> vst3::Class for PluginComponent<P> {
-    type Interfaces = (IAudioProcessor, IComponent, IComponent, IEditController, IEditController2, IMidiMapping, IProcessContextRequirements, IUnitInfo);
+    type Interfaces = (IAudioProcessor, IComponent, IComponent, IEditController, IEditController2, IMidiMapping, IProcessContextRequirements, IUnitInfo, INoteExpressionController, INoteExpressionPhysicalUIMapping);
 }
 
 impl<P: Vst3Plugin> IPluginBaseTrait for PluginComponent<P> {
@@ -146,24 +150,45 @@ impl<P: Vst3Plugin> IPluginBaseTrait for PluginComponent<P> {
             group::from_parameters(parameters)
         });
 
-        // Create parameters for MIDI pitch bend messages
+        // Allocate hidden reserved VST3 parameters for each MIDI message type the plugin requires via its MIDI_CAPABILITIES.
         plugin.with_parameters(|parameters| {
-            let mut parameter_id = 1;
-            let ids = parameters.ids();
+            let user_ids = parameters.ids();
+            let mut next_id: ParameterId = 1;
 
-            for (channel, pitch_bend_parameter_id) in self.pitch_bend_parameter_ids.borrow_mut().iter_mut().enumerate() {
-                while ids.contains(&parameter_id) {
-                    parameter_id += 1;
+            // Allocate one 16-channel block, pushing hidden ParameterInfos.
+            let mut alloc_block = |infos: &mut Vec<ParameterInfo>, name_fn: &dyn Fn(usize) -> String| -> [ParameterId; 16] {
+                let mut block = [0u32; 16];
+                for (channel, slot) in block.iter_mut().enumerate() {
+                    while user_ids.contains(&next_id) {
+                        next_id += 1;
+                    }
+                    infos.push(ParameterInfo::new(next_id, name_fn(channel)).hidden());
+                    *slot = next_id;
+                    next_id += 1;
                 }
+                block
+            };
 
-                let info = ParameterInfo::new(parameter_id, format!("MIDI Channel {} Pitch Bend", channel + 1))
-                    .hidden();
+            let mut midi_ids = MidiParameterIds::default();
 
-                parameter_infos.push(info);
-
-                *pitch_bend_parameter_id = parameter_id;
-                parameter_id += 1;
+            if P::MIDI_CAPABILITIES.midi_pitch_bend() {
+                midi_ids.pitch_bend = Some(alloc_block(&mut parameter_infos, &|channel| format!("MIDI Channel {} Pitch Bend", channel + 1)));
             }
+
+            if P::MIDI_CAPABILITIES.midi_channel_pressure() {
+                midi_ids.channel_pressure = Some(alloc_block(&mut parameter_infos, &|channel| format!("MIDI Channel {} Channel Pressure", channel + 1)));
+            }
+
+            if P::MIDI_CAPABILITIES.midi_program_change() {
+                midi_ids.program_change = Some(alloc_block(&mut parameter_infos, &|channel| format!("MIDI Channel {} Program Change", channel + 1)));
+            }
+
+            for cc in P::MIDI_CAPABILITIES.enabled_midi_control_changes() {
+                let block = alloc_block(&mut parameter_infos, &|channel| format!("MIDI Channel {} CC {}", channel + 1, cc));
+                midi_ids.cc.insert(cc, block);
+            }
+
+            *self.midi_parameter_ids.borrow_mut() = midi_ids;
         });
 
         *self.plugin.borrow_mut() = Some(plugin);
@@ -275,6 +300,10 @@ impl<P: Vst3Plugin> IAudioProcessorTrait for PluginComponent<P> {
             processor.reset();
         }
 
+        if let Ok(mut note_id_map) = self.note_id_map.try_borrow_mut() && !processing {
+            note_id_map.reset();
+        }
+        
         kResultOk
     }
 
@@ -282,8 +311,10 @@ impl<P: Vst3Plugin> IAudioProcessorTrait for PluginComponent<P> {
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
         let data = unsafe { &mut *data };
 
-        let parameter_change_iterator = ParameterChangeIterator::new(data.inputParameterChanges, *self.pitch_bend_parameter_ids.borrow());
-        let event_iterator = EventIterator::new(data.inputEvents);
+        let midi_ids = self.midi_parameter_ids.borrow();
+        let parameter_change_iterator = ParameterChangeIterator::new(data.inputParameterChanges, &midi_ids);
+        let mut note_id_map = self.note_id_map.borrow_mut();
+        let event_iterator = EventIterator::new(data.inputEvents, &mut note_id_map, P::NOTE_EXPRESSIONS);
         let all_events = event_iterator.chain(parameter_change_iterator);
         let is_data_dump = data.inputs.is_null() || data.outputs.is_null() || data.numInputs == 0 || data.numSamples == 0;
 
@@ -646,7 +677,7 @@ impl<P: Vst3Plugin + 'static> IEditControllerTrait for PluginComponent<P> {
             return kResultFalse;
         };
 
-        let event = parameter_change_to_event(id, value, 0, &self.pitch_bend_parameter_ids.borrow());
+        let event = parameter_change_to_event(id, value, 0, &self.midi_parameter_ids.borrow());
         plugin.process_event(&event);
 
         kResultOk
@@ -720,16 +751,37 @@ impl<P: Vst3Plugin> IMidiMappingTrait for PluginComponent<P> {
         if bus_index != 0 {
             return kResultFalse;
         }
-        if midi_controller_number != kPitchBend as i16 {
-            return kResultFalse;
-        }
         if !(0..16).contains(&channel) {
             return kInvalidArgument;
         }
 
-        unsafe { *id = self.pitch_bend_parameter_ids.borrow()[channel as usize] as _ };
+        let midi_ids = self.midi_parameter_ids.borrow();
+        let channel = channel as usize;
 
-        kResultTrue
+        if midi_controller_number == kPitchBend as i16 {
+            if let Some(pb_ids) = &midi_ids.pitch_bend {
+                unsafe { *id = pb_ids[channel] as _ };
+                return kResultTrue;
+            }
+        } else if midi_controller_number == kAfterTouch as i16 {
+            if let Some(cp_ids) = &midi_ids.channel_pressure {
+                unsafe { *id = cp_ids[channel] as _ };
+                return kResultTrue;
+            }
+        } else if midi_controller_number == kCtrlProgramChange as i16 {
+            if let Some(pc_ids) = &midi_ids.program_change {
+                unsafe { *id = pc_ids[channel] as _ };
+                return kResultTrue;
+            }
+        } else if (0..128).contains(&midi_controller_number) {
+            let cc = midi_controller_number as u8;
+            if let Some(cc_ids) = midi_ids.cc.get(&cc) {
+                unsafe { *id = cc_ids[channel] as _ };
+                return kResultTrue;
+            }
+        }
+
+        kResultFalse
     }
 }
 
@@ -837,5 +889,242 @@ impl<P: Vst3Plugin> IUnitInfoTrait for PluginComponent<P> {
     unsafe fn setUnitProgramData(&self, _list_or_unit_id: int32, _program_index: int32, _data: *mut IBStream) -> tresult {
         tracing::trace!("IUnitInfo::setUnitProgramData");
         kInvalidArgument
+    }
+}
+
+// Standard VST3 note-expression types. Only the enabled subset (per `NoteExpressions` config) is exposed to the host.
+struct NoteExpressionDescriptor {
+    type_id: NoteExpressionTypeID,
+    title: &'static str,
+    short_title: &'static str,
+    units: &'static str,
+    default_value: NoteExpressionValue,
+    enabled: fn(&NoteExpressions) -> bool,
+}
+
+const NOTE_EXPRESSION_DESCRIPTORS: [NoteExpressionDescriptor; 6] = [
+    NoteExpressionDescriptor {
+        type_id: kVolumeTypeID,
+        title: "Volume",
+        short_title: "Volume",
+        units: "",
+        default_value: 1.0,
+        enabled: NoteExpressions::volume,
+    },
+    NoteExpressionDescriptor {
+        type_id: kPanTypeID,
+        title: "Panning",
+        short_title: "Panning",
+        units: "",
+        default_value: 0.5, // center
+        enabled: NoteExpressions::pan,
+    },
+    NoteExpressionDescriptor {
+        type_id: kTuningTypeID,
+        title: "Tuning",
+        short_title: "Tuning",
+        units: "semitones",
+        default_value: 0.5, // center
+        enabled: NoteExpressions::tuning,
+    },
+    NoteExpressionDescriptor {
+        type_id: kVibratoTypeID,
+        title: "Vibrato",
+        short_title: "Vibrato",
+        units: "",
+        default_value: 0.0,
+        enabled: NoteExpressions::vibrato,
+    },
+    NoteExpressionDescriptor {
+        type_id: kExpressionTypeID,
+        title: "Expression",
+        short_title: "Expression",
+        units: "",
+        default_value: 0.0,
+        enabled: NoteExpressions::expression,
+    },
+    NoteExpressionDescriptor {
+        type_id: kBrightnessTypeID,
+        title: "Brightness",
+        short_title: "Brightness",
+        units: "",
+        default_value: 0.0,
+        enabled: NoteExpressions::brightness,
+    },
+];
+
+fn fill_note_expression_info(note_expressions: NoteExpressions, index: i32, info: &mut NoteExpressionTypeInfo) -> bool {
+    let Ok(index) = usize::try_from(index) else {
+        return false;
+    };
+    let Some(descriptor) = NOTE_EXPRESSION_DESCRIPTORS.iter().filter(|descriptor| (descriptor.enabled)(&note_expressions)).nth(index) else {
+        return false;
+    };
+
+    info.typeId = descriptor.type_id;
+    info.unitId = -1;
+    info.associatedParameterId = u32::MAX;
+    info.flags = 0;
+    info.valueDesc.minimum = 0.0;
+    info.valueDesc.maximum = 1.0;
+    info.valueDesc.stepCount = 0;
+    info.valueDesc.defaultValue = descriptor.default_value;
+    copy_str_to_char16(descriptor.title, &mut info.title);
+    copy_str_to_char16(descriptor.short_title, &mut info.shortTitle);
+    copy_str_to_char16(descriptor.units, &mut info.units);
+    true
+}
+
+impl<P: Vst3Plugin + 'static> INoteExpressionControllerTrait for PluginComponent<P> {
+    unsafe fn getNoteExpressionCount(&self, bus_index: int32, channel: int16) -> int32 {
+        tracing::trace!("INoteExpressionController::getNoteExpressionCount");
+        if bus_index == 0 && (0..16).contains(&channel) {
+            // NB: Pressure is excluded here. It is delivered as `kPolyPressureEvent`.
+            P::NOTE_EXPRESSIONS.volume() as i32
+                + P::NOTE_EXPRESSIONS.pan() as i32
+                + P::NOTE_EXPRESSIONS.tuning() as i32
+                + P::NOTE_EXPRESSIONS.vibrato() as i32
+                + P::NOTE_EXPRESSIONS.expression() as i32
+                + P::NOTE_EXPRESSIONS.brightness() as i32
+        } else {
+            0
+        }
+    }
+
+    unsafe fn getNoteExpressionInfo(&self, bus_index: int32, channel: int16, note_expression_index: int32, info: *mut NoteExpressionTypeInfo) -> tresult {
+        tracing::trace!("INoteExpressionController::getNoteExpressionInfo");
+
+        if bus_index != 0 || !(0..16).contains(&channel) || info.is_null() {
+            return kInvalidArgument;
+        }
+
+        let info = unsafe { &mut *info };
+        if fill_note_expression_info(P::NOTE_EXPRESSIONS, note_expression_index, info) {
+            kResultOk
+        } else {
+            kInvalidArgument
+        }
+    }
+
+    unsafe fn getNoteExpressionStringByValue(&self, bus_index: int32, channel: int16, id: NoteExpressionTypeID, value_normalized: NoteExpressionValue, string: *mut String128) -> tresult {
+        tracing::trace!("INoteExpressionController::getNoteExpressionStringByValue");
+
+        if P::NOTE_EXPRESSIONS.is_empty() {
+            return kInvalidArgument;
+        }
+        if bus_index != 0 || !(0..16).contains(&channel) || string.is_null() {
+            return kInvalidArgument;
+        }
+
+        let s = unsafe { &mut *string };
+
+        #[allow(non_upper_case_globals)]
+        let formatted = match id {
+            kVolumeTypeID => format!("{:.2}", value_normalized),
+            kPanTypeID => {
+                let pan = value_normalized * 200.0 - 100.0;
+                format!("{:.1} %", pan)
+            }
+            kTuningTypeID => {
+                let semitones = value_normalized * 240.0 - 120.0;
+                format!("{:+.2} st", semitones)
+            }
+            kVibratoTypeID | kExpressionTypeID | kBrightnessTypeID => {
+                format!("{:.2}", value_normalized)
+            }
+            _ => return kInvalidArgument,
+        };
+        copy_str_to_char16(&formatted, s);
+        kResultOk
+    }
+
+    unsafe fn getNoteExpressionValueByString(&self, bus_index: int32, channel: int16, id: NoteExpressionTypeID, string: *const TChar, value_normalized: *mut NoteExpressionValue) -> tresult {
+        tracing::trace!("INoteExpressionController::getNoteExpressionValueByString");
+
+        if P::NOTE_EXPRESSIONS.is_empty() {
+            return kInvalidArgument;
+        }
+        if bus_index != 0 || !(0..16).contains(&channel) || string.is_null() || value_normalized.is_null() {
+            return kInvalidArgument;
+        }
+
+        let s = unsafe { U16CStr::from_ptr_str(string as _) };
+        let Ok(s) = s.to_string() else {
+            return kInvalidArgument;
+        };
+        // Strip everything except digits to get a plain number string
+        let digits: String = s.chars().filter(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+')).collect();
+
+        #[allow(non_upper_case_globals)]
+        match id {
+            kTuningTypeID => {
+                if let Ok(semitones) = digits.parse::<f64>() {
+                    let value = (semitones + 120.0) / 240.0;
+                    unsafe { *value_normalized = value.clamp(0.0, 1.0) };
+                    kResultOk
+                } else {
+                    kResultFalse
+                }
+            }
+            kPanTypeID => {
+                if let Ok(pan_pct) = digits.parse::<f64>() {
+                    // Input may be a % in -100..100
+                    let value = (pan_pct + 100.0) / 200.0;
+                    unsafe { *value_normalized = value.clamp(0.0, 1.0) };
+                    kResultOk
+                } else {
+                    kResultFalse
+                }
+            }
+            kVolumeTypeID | kVibratoTypeID | kExpressionTypeID | kBrightnessTypeID => {
+                if let Ok(value) = digits.parse::<f64>() {
+                    unsafe { *value_normalized = value.clamp(0.0, 1.0) };
+                    kResultOk
+                } else {
+                    kResultFalse
+                }
+            }
+            _ => kInvalidArgument,
+        }
+    }
+}
+
+impl<P: Vst3Plugin> INoteExpressionPhysicalUIMappingTrait for PluginComponent<P> {
+    unsafe fn getPhysicalUIMapping(&self, bus_index: int32, channel: int16, list: *mut PhysicalUIMapList) -> tresult {
+        tracing::trace!("INoteExpressionPhysicalUIMapping::getPhysicalUIMapping");
+
+        if bus_index != 0 || !(0..16).contains(&channel) || list.is_null() {
+            return kInvalidArgument;
+        }
+
+        let list = unsafe { &mut *list };
+
+        for i in 0..list.count as usize {
+            let entry = unsafe { &mut *list.map.add(i) };
+            #[allow(non_upper_case_globals)]
+            let ne_type = if entry.physicalUITypeID == kPUIXMovement as u32 {
+                // Horizontal (slide left/right) -> per-note pitch / tuning
+                if P::NOTE_EXPRESSIONS.tuning() {
+                    kTuningTypeID
+                } else {
+                    kInvalidTypeID
+                }
+            } else if entry.physicalUITypeID == kPUIYMovement as u32 {
+                // Vertical (slide up/down) -> brightness / timbre
+                if P::NOTE_EXPRESSIONS.brightness() {
+                    kBrightnessTypeID
+                } else {
+                    kInvalidTypeID
+                }
+            } else if entry.physicalUITypeID == kPUIPressure as u32 {
+                // Pressure (Z-axis) -> delivered as kPolyPressureEvent, not note expression
+                kInvalidTypeID
+            } else {
+                kInvalidTypeID
+            };
+            entry.noteExpressionTypeID = ne_type;
+        }
+
+        kResultOk
     }
 }
