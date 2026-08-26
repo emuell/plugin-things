@@ -5,10 +5,12 @@ pub(super) const MIDI_CONTROLLER_COUNT: usize = 128;
 
 /// Compile-time declaration of which raw MIDI messages a plugin wants to receive as `Event`s.
 ///
-/// Only covers plain MIDI wire messages. Per-note expression are a separate mechanism enabled
-/// via [`crate::NoteExpressions`].
+/// Only covers plain MIDI wire messages. Per-note expressions are a separate mechanism enabled
+/// via [`Plugin::NOTE_EXPRESSIONS`](crate::Plugin::NOTE_EXPRESSIONS).
 ///
-/// Midi events do register dummy, hidden, per channel parameters in VST3 plugins, so only necessary
+/// Requires [`Plugin::HAS_NOTE_INPUT`](crate::Plugin::HAS_NOTE_INPUT) to be enabled as well.
+///
+/// MIDI events do register dummy, hidden, per channel parameters in VST3 plugins, so only necessary
 /// event types and CCs should be enabled to avoid adding lots of dummy parameters!
 ///
 /// Example:
@@ -44,39 +46,39 @@ impl MidiCapabilities {
         cc_mask: 0,
     };
 
-    /// Enable delivery of channel-wide pitch bend as [`Event::MidiPitchBend`].
+    /// Enable delivery of channel-wide pitch bend as [`Event::MidiPitchBend`](crate::Event::MidiPitchBend).
     pub const fn with_pitch_bend(mut self) -> Self {
         self.pitch_bend = true;
         self
     }
 
-    /// Enable delivery of channel pressure (mono aftertouch) as [`Event::MidiChannelPressure`].
+    /// Enable delivery of channel pressure (mono aftertouch) as [`Event::MidiChannelPressure`](crate::Event::MidiChannelPressure).
     pub const fn with_channel_pressure(mut self) -> Self {
         self.channel_pressure = true;
         self
     }
 
     /// Enable delivery of polyphonic key pressure (poly aftertouch) delivered as a raw MIDI byte
-    /// message, as [`Event::MidiPolyPressure`].
+    /// message, as [`Event::MidiPolyPressure`](crate::Event::MidiPolyPressure).
     pub const fn with_poly_pressure(mut self) -> Self {
         self.poly_pressure = true;
         self
     }
 
-    /// Enable delivery of program change messages as [`Event::MidiProgramChange`].
+    /// Enable delivery of program change messages as [`Event::MidiProgramChange`](crate::Event::MidiProgramChange).
     pub const fn with_program_change(mut self) -> Self {
         self.program_change = true;
         self
     }
 
-    /// Enable delivery of the given CC number as [`Event::MidiControlChange`].
+    /// Enable delivery of the given CC number as [`Event::MidiControlChange`](crate::Event::MidiControlChange).
     pub const fn with_control_change(mut self, cc: u8) -> Self {
         assert!(cc < MIDI_CONTROLLER_COUNT as u8, "MIDI CC number must be 0..=127");
         self.cc_mask |= 1u128 << cc;
         self
     }
 
-    /// Enable delivery of all CC numbers in the inclusive range `[start, end]` as [`Event::MidiControlChange`].
+    /// Enable delivery of all CC numbers in the inclusive range `[start, end]` as [`Event::MidiControlChange`](crate::Event::MidiControlChange).
     pub const fn with_control_change_range(mut self, start: u8, end: u8) -> Self {
         assert!(
             start <= end && end < MIDI_CONTROLLER_COUNT as u8,

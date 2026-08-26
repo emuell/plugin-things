@@ -3,7 +3,7 @@ use std::ffi::c_void;
 
 use clap_sys::events::{clap_event_note, clap_event_note_expression, clap_event_param_mod, clap_event_param_value, clap_event_midi, clap_input_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_EXPRESSION, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_MOD, CLAP_EVENT_PARAM_VALUE, CLAP_NOTE_EXPRESSION_TUNING, CLAP_EVENT_MIDI, CLAP_NOTE_EXPRESSION_BRIGHTNESS, CLAP_NOTE_EXPRESSION_EXPRESSION, CLAP_NOTE_EXPRESSION_PAN, CLAP_NOTE_EXPRESSION_PRESSURE, CLAP_NOTE_EXPRESSION_VIBRATO, CLAP_NOTE_EXPRESSION_VOLUME};
 
-use crate::{formats::midi::parse_midi_event, parameters::info::ParameterInfo, Event, MidiCapabilities, NoteExpressions, ParameterId};
+use crate::{formats::midi::{note_channel, note_id, note_key, parse_midi_event}, parameters::info::ParameterInfo, Event, MidiCapabilities, NoteExpressions, ParameterId};
 
 use super::parameters::map_parameter_value_from_clap;
 
@@ -57,11 +57,16 @@ impl Iterator for EventIterator<'_> {
                 CLAP_EVENT_NOTE_ON => {
                     let event = unsafe { &*(header as *const clap_event_note) };
 
+                    let (Some(channel), Some(key)) = (note_channel(event.channel), note_key(event.key)) else {
+                        // CLAP spec requires that valid channels and keys are specified for note-ons.
+                        continue;
+                    };
+
                     Some(Event::NoteOn {
                         sample_offset: event.header.time as _,
-                        channel: event.channel,
-                        key: event.key,
-                        note: event.note_id,
+                        channel,
+                        key,
+                        note_id: note_id(event.note_id),
                         velocity: event.velocity,
                     })
                 }
@@ -71,9 +76,9 @@ impl Iterator for EventIterator<'_> {
 
                     Some(Event::NoteOff {
                         sample_offset: event.header.time as _,
-                        channel: event.channel,
-                        key: event.key,
-                        note: event.note_id,
+                        channel: note_channel(event.channel),
+                        key: note_key(event.key),
+                        note_id: note_id(event.note_id),
                         velocity: event.velocity,
                     })
                 }
@@ -81,9 +86,9 @@ impl Iterator for EventIterator<'_> {
                 CLAP_EVENT_NOTE_EXPRESSION => {
                     let event = unsafe { &*(header as *const clap_event_note_expression) };
                     let note_expressions = self.note_expressions;
-                    let channel = event.channel;
-                    let key = event.key;
-                    let note = event.note_id;
+                    let channel = note_channel(event.channel);
+                    let note_id = note_id(event.note_id);
+                    let key = note_key(event.key);
                     let value = event.value;
                     let sample_offset = event.header.time as usize;
 
@@ -93,7 +98,7 @@ impl Iterator for EventIterator<'_> {
                                 sample_offset,
                                 channel,
                                 key,
-                                note,
+                                note_id,
                                 // fractional semitones, -120 to +120
                                 semitones: value,
                             })
@@ -104,7 +109,7 @@ impl Iterator for EventIterator<'_> {
                                 sample_offset,
                                 channel,
                                 key,
-                                note,
+                                note_id,
                                 // pass value in [0..1] as it is
                                 value,
                             })
@@ -114,8 +119,8 @@ impl Iterator for EventIterator<'_> {
                             Some(Event::PolyVolume {
                                 sample_offset,
                                 channel,
+                                note_id,
                                 key,
-                                note,
                                 // pass value in [0..4] as it is
                                 gain: value,
                             })
@@ -125,8 +130,8 @@ impl Iterator for EventIterator<'_> {
                             Some(Event::PolyPan {
                                 sample_offset,
                                 channel,
+                                note_id,
                                 key,
-                                note,
                                 // CLAP pan: 0=left, 0.5=center, 1=right -> map to [-1, +1]
                                 pan: value * 2.0 - 1.0,
                             })
@@ -136,8 +141,8 @@ impl Iterator for EventIterator<'_> {
                             Some(Event::PolyVibrato {
                                 sample_offset,
                                 channel,
+                                note_id,
                                 key,
-                                note,
                                 // pass value in [0..1] as it is
                                 amount: value,
                             })
@@ -147,8 +152,8 @@ impl Iterator for EventIterator<'_> {
                             Some(Event::PolyExpression {
                                 sample_offset,
                                 channel,
+                                note_id,
                                 key,
-                                note,
                                 // pass value in [0..1] as it is
                                 amount: value,
                             })
@@ -158,8 +163,8 @@ impl Iterator for EventIterator<'_> {
                             Some(Event::PolyBrightness {
                                 sample_offset,
                                 channel,
+                                note_id,
                                 key,
-                                note,
                                 // pass value in [0..1] as it is
                                 amount: value,
                             })
@@ -191,7 +196,7 @@ impl Iterator for EventIterator<'_> {
                         id: event.param_id,
                         value,
                     })
-                },
+                }
 
                 CLAP_EVENT_PARAM_MOD => {
                     let event = unsafe { &*(header as *const clap_event_param_mod) };
@@ -204,7 +209,7 @@ impl Iterator for EventIterator<'_> {
                         id: event.param_id,
                         amount,
                     })
-                },
+                }
 
                 // All other event types (MIDI2, sysex, etc.) are unsupported and skipped.
                 _ => None,

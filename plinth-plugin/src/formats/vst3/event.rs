@@ -3,6 +3,7 @@ use std::mem;
 use vst3::Steinberg::Vst::NoteExpressionTypeIDs_::{kBrightnessTypeID, kExpressionTypeID, kPanTypeID, kTuningTypeID, kVibratoTypeID, kVolumeTypeID};
 use vst3::{ComRef, Steinberg::{kResultOk, Vst::{self, IEventList, IEventListTrait}}};
 
+use crate::formats::midi::{note_channel, note_id, note_key};
 use crate::{Event, NoteExpressions};
 
 use super::note_expression::NoteExpressionDescriptor;
@@ -44,45 +45,62 @@ impl Iterator for EventIterator<'_> {
 
             let event = match event.r#type as _ {
                 Vst::Event_::EventTypes_::kNoteOnEvent => unsafe {
+                    let note_on = event.__field0.noteOn;
+
+                    // VST3 always supplies a valid channel and key on a note-on, but a wildcard
+                    // or out of range value is invalid and should get skipped.
+                    let (Some(channel), Some(key)) = (note_channel(note_on.channel), note_key(note_on.pitch)) else {
+                        continue;
+                    };
+
                     Some(Event::NoteOn {
                         sample_offset: event.sampleOffset as _,
-                        channel: event.__field0.noteOn.channel,
-                        key: event.__field0.noteOn.pitch,
-                        note: event.__field0.noteOn.noteId,
-                        velocity: event.__field0.noteOn.velocity as _,
+                        channel,
+                        key,
+                        note_id: note_id(note_on.noteId),
+                        velocity: note_on.velocity as _,
                     })
                 },
 
                 Vst::Event_::EventTypes_::kNoteOffEvent => unsafe {
+                    let note_off = event.__field0.noteOff;
+
                     Some(Event::NoteOff {
                         sample_offset: event.sampleOffset as _,
-                        channel: event.__field0.noteOff.channel,
-                        key: event.__field0.noteOff.pitch,
-                        note: event.__field0.noteOff.noteId,
-                        velocity: event.__field0.noteOff.velocity as _,
+                        channel: note_channel(note_off.channel),
+                        key: note_key(note_off.pitch),
+                        note_id: note_id(note_off.noteId),
+                        velocity: note_off.velocity as _,
                     })
                 },
 
                 Vst::Event_::EventTypes_::kPolyPressureEvent if self.note_expressions.pressure() =>
                 unsafe {
+                    let poly_pressure = event.__field0.polyPressure;
+
                     Some(Event::PolyPressure {
                         sample_offset: event.sampleOffset as _,
-                        channel: event.__field0.polyPressure.channel,
-                        key: event.__field0.polyPressure.pitch,
-                        note: event.__field0.polyPressure.noteId,
-                        value: event.__field0.polyPressure.pressure as _,
+                        channel: note_channel(poly_pressure.channel),
+                        key: note_key(poly_pressure.pitch),
+                        note_id: note_id(poly_pressure.noteId),
+                        value: poly_pressure.pressure as _,
                     })
                 },
 
                 Vst::Event_::EventTypes_::kNoteExpressionValueEvent => unsafe {
                     let sample_offset = event.sampleOffset as usize;
                     let note_expression = event.__field0.noteExpressionValue;
-                    let note = note_expression.noteId;
                     let value = note_expression.value;
 
                     // Key and channel are not provided for VST3, just the note_id
-                    let channel = -1;
-                    let key = -1;
+                    let channel: Option<u8> = None;
+                    let key: Option<u8> = None;
+
+                    // An expression with a missing note id addresses nothing at all, so skip it.
+                    let note_id = note_id(note_expression.noteId);
+                    if note_id.is_none() {
+                        continue;
+                    }
 
                     // NB: All VST3 note-expression values arrive normalized to [0, 1].
                     #[allow(non_upper_case_globals)]
@@ -92,7 +110,7 @@ impl Iterator for EventIterator<'_> {
                                 sample_offset,
                                 channel,
                                 key,
-                                note,
+                                note_id,
                                 // NB: CLAP's PolyVolume is 0..4, where 1 is 0db, so we only use the 0..1 volume range here
                                 gain: value,
                             })
@@ -100,16 +118,16 @@ impl Iterator for EventIterator<'_> {
                         kPanTypeID if self.note_expressions.pan() => Some(Event::PolyPan {
                             sample_offset,
                             channel,
+                            note_id,
                             key,
-                            note,
                             pan: NoteExpressionDescriptor::normalized_to_pan(value),
                         }),
                         kTuningTypeID if self.note_expressions.tuning() => {
                             Some(Event::PolyTuning {
                                 sample_offset,
                                 channel,
+                                note_id,
                                 key,
-                                note,
                                 semitones: NoteExpressionDescriptor::normalized_to_semitones(value),
                             })
                         }
@@ -117,8 +135,8 @@ impl Iterator for EventIterator<'_> {
                             Some(Event::PolyVibrato {
                                 sample_offset,
                                 channel,
+                                note_id,
                                 key,
-                                note,
                                 amount: value,
                             })
                         }
@@ -126,8 +144,8 @@ impl Iterator for EventIterator<'_> {
                             Some(Event::PolyExpression {
                                 sample_offset,
                                 channel,
+                                note_id,
                                 key,
-                                note,
                                 amount: value,
                             })
                         }
@@ -135,8 +153,8 @@ impl Iterator for EventIterator<'_> {
                             Some(Event::PolyBrightness {
                                 sample_offset,
                                 channel,
+                                note_id,
                                 key,
-                                note,
                                 amount: value,
                             })
                         }

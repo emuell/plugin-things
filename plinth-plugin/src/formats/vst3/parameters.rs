@@ -25,8 +25,8 @@ pub(super) fn parameter_change_to_event(
     sample_offset: usize,
     midi_ids: &MidiParameterIds,
 ) -> Event {
-    let channel_of = |ids: Option<&[ParameterId; MIDI_CHANNEL_COUNT]>, id: ParamID| -> Option<i16> {
-        ids.and_then(|ids| ids.iter().position(|&pid| pid == id).map(|pos| pos as i16))
+    let channel_of = |ids: Option<&[ParameterId; MIDI_CHANNEL_COUNT]>, id: ParamID| -> Option<u8> {
+        ids.and_then(|ids| ids.iter().position(|&pid| pid == id).map(|pos| pos as u8))
     };
 
     // Pitch bend: VST3 normalizes to [0, 1]: map to [-2, +2] semitones
