@@ -22,7 +22,7 @@ pub(crate) fn parse_midi_event(
     match status {
         // Note-on: velocity 0 is treated as note-off per MIDI spec.
         0x90 if data.len() >= 3 && data[2] > 0 => Some(Event::NoteOn {
-            sample_offset: 0,
+            sample_offset,
             channel,
             key: data[1] as i16,
             note: -1,
@@ -37,7 +37,7 @@ pub(crate) fn parse_midi_event(
                 0.0
             };
             Some(Event::NoteOff {
-                sample_offset: 0,
+                sample_offset,
                 channel,
                 key: data[1] as i16,
                 note: -1,

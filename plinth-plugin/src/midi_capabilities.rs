@@ -1,3 +1,8 @@
+/// Number of MIDI channels on the plugin's event bus.
+pub(super) const MIDI_CHANNEL_COUNT: usize = 16;
+/// Number of MIDI CC controller values that can be enabled.
+pub(super) const MIDI_CONTROLLER_COUNT: usize = 128;
+
 /// Compile-time declaration of which raw MIDI messages a plugin wants to receive as `Event`s.
 ///
 /// Only covers plain MIDI wire messages. Per-note expression are a separate mechanism enabled
@@ -66,7 +71,7 @@ impl MidiCapabilities {
 
     /// Enable delivery of the given CC number as [`Event::MidiControlChange`].
     pub const fn with_control_change(mut self, cc: u8) -> Self {
-        assert!(cc < 128, "MIDI CC number must be 0..=127");
+        assert!(cc < MIDI_CONTROLLER_COUNT as u8, "MIDI CC number must be 0..=127");
         self.cc_mask |= 1u128 << cc;
         self
     }
@@ -74,7 +79,7 @@ impl MidiCapabilities {
     /// Enable delivery of all CC numbers in the inclusive range `[start, end]` as [`Event::MidiControlChange`].
     pub const fn with_control_change_range(mut self, start: u8, end: u8) -> Self {
         assert!(
-            start <= end && end < 128,
+            start <= end && end < MIDI_CONTROLLER_COUNT as u8,
             "invalid CC range: must be start <= end <= 127"
         );
         let mut cc = start;
@@ -116,7 +121,7 @@ impl MidiCapabilities {
 
     /// Returns `true` if the given CC number is enabled.
     pub const fn has_midi_control_change(&self, cc: u8) -> bool {
-        if cc >= 128 {
+        if cc >= MIDI_CONTROLLER_COUNT as u8 {
             return false;
         }
         (self.cc_mask >> cc) & 1 != 0
@@ -128,7 +133,7 @@ impl MidiCapabilities {
     }
 
     /// Iterates over enabled CC numbers in ascending order.
-    pub fn enabled_midi_control_changes(&self) -> impl Iterator<Item = u8> + '_ {
-        (0u8..128).filter(move |&cc| self.has_midi_control_change(cc))
+    pub fn midi_control_changes(&self) -> impl Iterator<Item = u8> + '_ {
+        (0u8..MIDI_CONTROLLER_COUNT as u8).filter(move |&cc| self.has_midi_control_change(cc))
     }
 }

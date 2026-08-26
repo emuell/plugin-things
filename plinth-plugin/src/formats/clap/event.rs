@@ -170,7 +170,7 @@ impl Iterator for EventIterator<'_> {
                     }
                 }
 
-                // Covert raw MIDI bytes to CC / channel pressure / pitch bend / poly pressure events.
+                // Convert raw MIDI bytes to CC / channel pressure / pitch bend / poly pressure events.
                 CLAP_EVENT_MIDI => {
                     let event = unsafe { &*(header as *const clap_event_midi) };
                     parse_midi_event(

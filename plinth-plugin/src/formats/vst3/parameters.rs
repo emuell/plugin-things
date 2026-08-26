@@ -3,17 +3,17 @@ use std::collections::BTreeMap;
 
 use vst3::{ComRef, Steinberg::{kResultOk, Vst::{IParamValueQueueTrait, IParameterChanges, IParameterChangesTrait, ParamID, ParamValue}}};
 
-use crate::{event::Event, ParameterId};
+use crate::{event::Event, ParameterId, midi_capabilities::MIDI_CHANNEL_COUNT};
 
 /// Reserved VST3 parameter-ID blocks.
 ///
 /// Each block holds 16 hidden parameters, one per MIDI channel.
 #[derive(Default)]
 pub(super) struct MidiParameterIds {
-    pub pitch_bend: Option<[ParameterId; 16]>,
-    pub channel_pressure: Option<[ParameterId; 16]>,
-    pub program_change: Option<[ParameterId; 16]>,
-    pub cc: BTreeMap<u8, [ParameterId; 16]>,
+    pub pitch_bend: Option<[ParameterId; MIDI_CHANNEL_COUNT]>,
+    pub channel_pressure: Option<[ParameterId; MIDI_CHANNEL_COUNT]>,
+    pub program_change: Option<[ParameterId; MIDI_CHANNEL_COUNT]>,
+    pub cc: BTreeMap<u8, [ParameterId; MIDI_CHANNEL_COUNT]>,
 }
 
 /// Map a VST3 parameter change event to an `Event`, recognising reserved MIDI blocks.
@@ -22,53 +22,49 @@ pub(super) struct MidiParameterIds {
 pub(super) fn parameter_change_to_event(
     id: ParamID,
     value: ParamValue,
-    offset: usize,
+    sample_offset: usize,
     midi_ids: &MidiParameterIds,
 ) -> Event {
+    let channel_of = |ids: Option<&[ParameterId; MIDI_CHANNEL_COUNT]>, id: ParamID| -> Option<i16> {
+        ids.and_then(|ids| ids.iter().position(|&pid| pid == id).map(|pos| pos as i16))
+    };
+
     // Pitch bend: VST3 normalizes to [0, 1]: map to [-2, +2] semitones
-    if let Some(channel) = &midi_ids
-        .pitch_bend
-        .and_then(|pb_ids| pb_ids.iter().position(|&pid| pid == id))
-    {
+    if let Some(channel) = channel_of(midi_ids.pitch_bend.as_ref(), id) {
         let semitones = (value - 0.5) * 4.0;
         return Event::MidiPitchBend {
-            sample_offset: offset,
-            channel: *channel as _,
+            sample_offset,
+            channel,
             semitones,
         };
     }
 
     // Channel pressure: VST3 normalizes to [0, 1]: passed through as it is.
-    if let Some(channel) = &midi_ids
-        .channel_pressure
-        .and_then(|cp_ids| cp_ids.iter().position(|&pid| pid == id))
-    {
+    if let Some(channel) = channel_of(midi_ids.channel_pressure.as_ref(), id) {
         return Event::MidiChannelPressure {
-            sample_offset: offset,
-            channel: *channel as _,
+            sample_offset,
+            channel,
             value,
         };
     }
 
     // Program change: VST3 normalizes to [0, 1]: round to the nearest program number.
-    if let Some(channel) = &midi_ids
-        .program_change
-        .and_then(|pc_ids| pc_ids.iter().position(|&pid| pid == id))
-    {
+    if let Some(channel) = channel_of(midi_ids.program_change.as_ref(), id) {
+        let program = (value * 127.0).round() as u8;
         return Event::MidiProgramChange {
-            sample_offset: offset,
-            channel: *channel as _,
-            program: (value * 127.0).round() as u8,
+            sample_offset,
+            channel,
+            program,
         };
     }
 
     // MIDI CC: VST3 normalizes to [0, 1]: passed through as it is.
-    for (&cc, cc_ids) in &midi_ids.cc {
-        if let Some(channel) = cc_ids.iter().position(|&pid| pid == id) {
+    for (&controller, controller_ids) in &midi_ids.cc {
+        if let Some(channel) = channel_of(Some(controller_ids), id) {
             return Event::MidiControlChange {
-                sample_offset: offset,
-                channel: channel as _,
-                controller: cc,
+                sample_offset,
+                channel,
+                controller,
                 value,
             };
         }
@@ -76,7 +72,7 @@ pub(super) fn parameter_change_to_event(
 
     // Fall through to ordinary parameter
     Event::ParameterValue {
-        sample_offset: offset,
+        sample_offset,
         id,
         value,
     }
@@ -148,7 +144,7 @@ impl Iterator for ParameterChangeIterator<'_> {
                             } else {
                                 nth += 1;
                                 None
-                            }    
+                            }
                         },
 
                         cmp::Ordering::Greater => Some((id, offset, value)),
@@ -175,7 +171,6 @@ impl Iterator for ParameterChangeIterator<'_> {
         }
 
         let event = parameter_change_to_event(id, value, offset, self.midi_parameter_ids);
-
         Some(event)
     }
 }

@@ -5,85 +5,19 @@ use vst3::{ComRef, Steinberg::{kResultOk, Vst::{self, IEventList, IEventListTrai
 
 use crate::{Event, NoteExpressions};
 
-#[derive(Clone, Copy)]
-struct NoteIdEntry {
-    note_id: i32,
-    channel: i16,
-    key: i16,
-}
-
-/// Fixed-capacity mapping of VST3 `note_id -> (channel, key)`.
-pub(super) struct NoteIdMap {
-    entries: [NoteIdEntry; Self::CAPACITY],
-    /// Index of the next slot to write into in the ring buffer.
-    write_index: usize,
-    /// Number of valid entries, capped at CAPACITY.
-    count: usize,
-}
-
-impl NoteIdMap {
-    const CAPACITY: usize = 128; // max note count
-
-    pub fn new() -> Self {
-        const EMPTY_ENTRY: NoteIdEntry = NoteIdEntry {
-            note_id: 0,
-            channel: 0,
-            key: 0,
-        };
-        Self {
-            entries: [EMPTY_ENTRY; Self::CAPACITY],
-            write_index: 0,
-            count: 0,
-        }
-    }
-
-    pub fn reset(&mut self) {
-        *self = Self::new();
-    }
-
-    fn insert(&mut self, note_id: i32, channel: i16, key: i16) {
-        self.entries[self.write_index] = NoteIdEntry {
-            note_id,
-            channel,
-            key,
-        };
-        self.write_index = (self.write_index + 1) % Self::CAPACITY;
-        if self.count < Self::CAPACITY {
-            self.count += 1;
-        }
-    }
-
-    fn lookup(&self, note_id: i32) -> Option<(i16, i16)> {
-        for i in 0..self.count {
-            let index = (self.write_index + Self::CAPACITY - 1 - i) % Self::CAPACITY;
-            let entry = &self.entries[index];
-            if entry.note_id == note_id {
-                return Some((entry.channel, entry.key));
-            }
-        }
-        None
-    }
-}
-
-impl Default for NoteIdMap {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+use super::note_expression::NoteExpressionDescriptor;
 
 pub struct EventIterator<'a> {
     event_list: Option<ComRef<'a, IEventList>>,
     index: usize,
-    note_id_map: &'a mut NoteIdMap,
     note_expressions: NoteExpressions,
 }
 
 impl<'a> EventIterator<'a> {
-    pub fn new(event_list: *mut IEventList, note_id_map: &'a mut NoteIdMap, note_expressions: NoteExpressions) -> Self {
+    pub fn new(event_list: *mut IEventList, note_expressions: NoteExpressions) -> Self {
         Self {
             event_list: unsafe { ComRef::from_raw(event_list) },
             index: 0,
-            note_id_map,
             note_expressions,
         }
     }
@@ -110,12 +44,6 @@ impl Iterator for EventIterator<'_> {
 
             let event = match event.r#type as _ {
                 Vst::Event_::EventTypes_::kNoteOnEvent => unsafe {
-                    // Track note ID -> (channel, key) for later note-expression lookups
-                    self.note_id_map.insert(
-                        event.__field0.noteOn.noteId,
-                        event.__field0.noteOn.channel,
-                        event.__field0.noteOn.pitch,
-                    );
                     Some(Event::NoteOn {
                         sample_offset: event.sampleOffset as _,
                         channel: event.__field0.noteOn.channel,
@@ -150,10 +78,11 @@ impl Iterator for EventIterator<'_> {
                     let sample_offset = event.sampleOffset as usize;
                     let note_expression = event.__field0.noteExpressionValue;
                     let note = note_expression.noteId;
-                    let value  = note_expression.value;
+                    let value = note_expression.value;
 
-                    // Resolve the note's channel and key from the note map.
-                    let (channel, key) = self.note_id_map.lookup(note).unwrap_or((-1, -1));
+                    // Key and channel are not provided for VST3, just the note_id
+                    let channel = -1;
+                    let key = -1;
 
                     // NB: All VST3 note-expression values arrive normalized to [0, 1].
                     #[allow(non_upper_case_globals)]
@@ -173,8 +102,7 @@ impl Iterator for EventIterator<'_> {
                             channel,
                             key,
                             note,
-                            // Registered min=0, max=1, center=0.5 -> map to [-1, 1]
-                            pan: value * 2.0 - 1.0,
+                            pan: NoteExpressionDescriptor::normalized_to_pan(value),
                         }),
                         kTuningTypeID if self.note_expressions.tuning() => {
                             Some(Event::PolyTuning {
@@ -182,8 +110,7 @@ impl Iterator for EventIterator<'_> {
                                 channel,
                                 key,
                                 note,
-                                // Registered min=0, max=1, center=0.5 -> map to [-120, +120] semitones
-                                semitones: value * 240.0 - 120.0,
+                                semitones: NoteExpressionDescriptor::normalized_to_semitones(value),
                             })
                         }
                         kVibratoTypeID if self.note_expressions.vibrato() => {
