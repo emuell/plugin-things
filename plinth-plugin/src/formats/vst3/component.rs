@@ -12,7 +12,7 @@ use vst3::Steinberg::Vst::ControllerNumbers_::{kAfterTouch, kCtrlProgramChange, 
 use vst3::Steinberg::Vst::{CtrlNumber, IMidiMapping, IMidiMappingTrait, INoteExpressionController, INoteExpressionPhysicalUIMapping};
 use vst3::{ComPtr, ComRef};
 use vst3::Steinberg::{int16, int32, kInvalidArgument, kNoInterface, kResultFalse, kResultOk, kResultTrue, tresult, uint32, FIDString, FUnknown, IBStream, IPlugView, IPluginBaseTrait, TBool, TUID};
-use vst3::Steinberg::Vst::{kInfiniteTail, kNoParentUnitId, kNoProgramListId, kNoTail, BusDirection, BusDirections_, BusInfo, BusInfo_::BusFlags_, BusTypes_, CString, IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentHandler, IComponentTrait, IEditController, IEditController2, IEditController2Trait, IEditControllerTrait, IHostApplication, IHostApplicationTrait, IProcessContextRequirements, IProcessContextRequirementsTrait, IProcessContextRequirements_, IUnitInfo, IUnitInfoTrait, IoMode, IoModes_, KnobMode, MediaType, MediaTypes_, ParamID, ParamValue, ParameterInfo_, ProcessData, ProcessSetup, ProgramListID, ProgramListInfo, RoutingInfo, SpeakerArr, SpeakerArrangement, String128, SymbolicSampleSizes_, TChar, UnitID, UnitInfo, ViewType::kEditor};
+use vst3::Steinberg::Vst::{kInfiniteTail, kNoParentUnitId, kNoProgramListId, kNoTail, BusDirection, BusDirections, BusDirections_, BusInfo, BusInfo_::BusFlags_, BusTypes_, CString, IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentHandler, IComponentTrait, IEditController, IEditController2, IEditController2Trait, IEditControllerTrait, IHostApplication, IHostApplicationTrait, IProcessContextRequirements, IProcessContextRequirementsTrait, IProcessContextRequirements_, IUnitInfo, IUnitInfoTrait, IoMode, IoModes_, KnobMode, MediaType, MediaTypes, MediaTypes_, ParamID, ParamValue, ParameterInfo_, ProcessData, ProcessSetup, ProgramListID, ProgramListInfo, RoutingInfo, SpeakerArr, SpeakerArrangement, String128, SymbolicSampleSizes_, TChar, UnitID, UnitInfo, ViewType::kEditor};
 use widestring::U16CStr;
 
 use crate::formats::PluginFormat;
@@ -149,6 +149,11 @@ impl<P: Vst3Plugin> IPluginBaseTrait for PluginComponent<P> {
 
         // Allocate hidden reserved VST3 parameters for each MIDI message type the plugin requires via its MIDI_CAPABILITIES.
         plugin.with_parameters(|parameters| {
+            if !P::HAS_NOTE_INPUT {
+                // MIDI needs a note input port, so allocate nothing without one.
+                return;
+            }
+
             let user_ids = parameters.ids();
             let mut next_id: ParameterId = 1;
 
@@ -424,12 +429,24 @@ impl<P: Vst3Plugin> IComponentTrait for PluginComponent<P> {
     unsafe fn getBusCount(&self, media_type: MediaType, dir: BusDirection) -> int32 {
         tracing::trace!("IComponent::getBusCount");
 
-        // On some platforms, these casts are needed
-        #[allow(clippy::unnecessary_cast)]
-        if P::HAS_AUX_INPUT && media_type == MediaTypes_::kAudio as i32 && dir == BusDirections_::kInput as i32 {
-            2
-        } else {
-            1
+        let is_input = dir as BusDirections == BusDirections_::kInput;
+
+        match media_type as MediaTypes {
+            MediaTypes_::kAudio => {
+                if is_input && P::HAS_AUX_INPUT {
+                    2
+                } else {
+                    1
+                }
+            }
+            MediaTypes_::kEvent => {
+                if is_input {
+                    P::HAS_NOTE_INPUT as int32
+                } else {
+                    P::HAS_NOTE_OUTPUT as int32
+                }
+            }
+            _ => 0
         }
     }
 

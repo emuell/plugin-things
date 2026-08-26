@@ -172,7 +172,7 @@ impl<P: Vst3Plugin + 'static> INoteExpressionControllerTrait for PluginComponent
     unsafe fn getNoteExpressionCount(&self, bus_index: int32, channel: int16) -> int32 {
         tracing::trace!("INoteExpressionController::getNoteExpressionCount");
 
-        if bus_index != 0 || !(0..MIDI_CHANNEL_COUNT as i16).contains(&channel) {
+        if !P::HAS_NOTE_INPUT || bus_index != 0 || !(0..MIDI_CHANNEL_COUNT as i16).contains(&channel) {
             return 0;
         }
 
@@ -182,7 +182,7 @@ impl<P: Vst3Plugin + 'static> INoteExpressionControllerTrait for PluginComponent
     unsafe fn getNoteExpressionInfo(&self, bus_index: int32, channel: int16, note_expression_index: int32, info: *mut NoteExpressionTypeInfo) -> tresult {
         tracing::trace!("INoteExpressionController::getNoteExpressionInfo");
 
-        if bus_index != 0 || !(0..MIDI_CHANNEL_COUNT as i16).contains(&channel) || info.is_null() {
+        if !P::HAS_NOTE_INPUT || bus_index != 0 || !(0..MIDI_CHANNEL_COUNT as i16).contains(&channel) || info.is_null() {
             return kInvalidArgument;
         }
 
@@ -201,7 +201,7 @@ impl<P: Vst3Plugin + 'static> INoteExpressionControllerTrait for PluginComponent
     unsafe fn getNoteExpressionStringByValue(&self, bus_index: int32, channel: int16, id: NoteExpressionTypeID, value_normalized: NoteExpressionValue, string: *mut String128) -> tresult {
         tracing::trace!("INoteExpressionController::getNoteExpressionStringByValue");
 
-        if bus_index != 0 || !(0..MIDI_CHANNEL_COUNT as i16).contains(&channel) || string.is_null() {
+        if !P::HAS_NOTE_INPUT || bus_index != 0 || !(0..MIDI_CHANNEL_COUNT as i16).contains(&channel) || string.is_null() {
             return kInvalidArgument;
         }
 
@@ -217,7 +217,7 @@ impl<P: Vst3Plugin + 'static> INoteExpressionControllerTrait for PluginComponent
     unsafe fn getNoteExpressionValueByString(&self, bus_index: int32, channel: int16, id: NoteExpressionTypeID, string: *const TChar, value_normalized: *mut NoteExpressionValue) -> tresult {
         tracing::trace!("INoteExpressionController::getNoteExpressionValueByString");
 
-        if bus_index != 0 || !(0..MIDI_CHANNEL_COUNT as i16).contains(&channel) || string.is_null() || value_normalized.is_null() {
+        if !P::HAS_NOTE_INPUT || bus_index != 0 || !(0..MIDI_CHANNEL_COUNT as i16).contains(&channel) || string.is_null() || value_normalized.is_null() {
             return kInvalidArgument;
         }
 
@@ -244,7 +244,7 @@ impl<P: Vst3Plugin> INoteExpressionPhysicalUIMappingTrait for PluginComponent<P>
     unsafe fn getPhysicalUIMapping(&self, bus_index: int32, channel: int16, list: *mut PhysicalUIMapList) -> tresult {
         tracing::trace!("INoteExpressionPhysicalUIMapping::getPhysicalUIMapping");
 
-        if bus_index != 0 || !(0..MIDI_CHANNEL_COUNT as i16).contains(&channel) || list.is_null() {
+        if !P::HAS_NOTE_INPUT || bus_index != 0 || !(0..MIDI_CHANNEL_COUNT as i16).contains(&channel) || list.is_null() {
             return kInvalidArgument;
         }
 
