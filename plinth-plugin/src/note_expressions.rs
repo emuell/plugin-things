@@ -69,6 +69,7 @@ impl NoteExpressions {
     }
 
     /// Enable delivery of per-note tuning offset as [`crate::Event::PolyTuning`].
+    /// This is MPE's X axis ("pitch" or "glide").
     pub const fn with_tuning(mut self) -> Self {
         self.tuning = true;
         self
@@ -80,19 +81,23 @@ impl NoteExpressions {
         self
     }
 
-    /// Enable delivery of per-note expression (MPE "slide") as [`crate::Event::PolyExpression`].
+    /// Enable delivery of per-note expression (breath / expression pedal) as
+    /// [`crate::Event::PolyExpression`]. This is not MPE's timbre: see [`Self::with_brightness`].
     pub const fn with_expression(mut self) -> Self {
         self.expression = true;
         self
     }
 
-    /// Enable delivery of per-note brightness as [`crate::Event::PolyBrightness`].
+    /// Enable delivery of per-note brightness a.k.a. timbre as
+    /// [`crate::Event::PolyBrightness`]. This is MPE's third dimension, a controller's
+    /// Y axis ("slide", CC74).
     pub const fn with_brightness(mut self) -> Self {
         self.brightness = true;
         self
     }
 
-    /// Enable delivery of per-note pressure (poly aftertouch) as [`crate::Event::PolyPressure`].
+    /// Enable delivery of per-note pressure (poly aftertouch) as
+    /// [`crate::Event::PolyPressure`]. This is MPE's Z axis ("pressure").
     pub const fn with_pressure(mut self) -> Self {
         self.pressure = true;
         self
@@ -119,7 +124,7 @@ impl NoteExpressions {
         self.pan
     }
 
-    /// Returns `true` if per-note tuning is enabled.
+    /// Returns `true` if per-note tuning (MPE's X axis) is enabled.
     pub const fn tuning(&self) -> bool {
         self.tuning
     }
@@ -129,17 +134,17 @@ impl NoteExpressions {
         self.vibrato
     }
 
-    /// Returns `true` if per-note expression (MPE "slide") is enabled.
+    /// Returns `true` if per-note expression (breath / expression pedal) is enabled.
     pub const fn expression(&self) -> bool {
         self.expression
     }
 
-    /// Returns `true` if per-note brightness is enabled.
+    /// Returns `true` if per-note brightness a.k.a. timbre is enabled.
     pub const fn brightness(&self) -> bool {
         self.brightness
     }
 
-    /// Returns `true` if per-note pressure (poly aftertouch) is enabled.
+    /// Returns `true` if per-note pressure (poly aftertouch, MPE's Z axis) is enabled.
     pub const fn pressure(&self) -> bool {
         self.pressure
     }

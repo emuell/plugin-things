@@ -63,6 +63,9 @@ pub enum Event {
     /// Polyphonic key pressure (poly aftertouch, VST3's `kPolyPressureEvent` or
     /// CLAP's `CLAP_NOTE_EXPRESSION_PRESSURE`).
     ///
+    /// This is MPE's Z axis, labelled "Pressure" (or "Press") by hosts and controllers,
+    /// sent as channel pressure on the note's member channel over plain MIDI.
+    ///
     /// `value` is in [0, 1]. The same value delivered as a raw MIDI byte message arrives as
     /// [`Event::MidiPolyPressure`].
     ///
@@ -90,7 +93,12 @@ pub enum Event {
         pan: f64,
     },
 
-    /// Per-note tuning offset in semitones.
+    /// Per-note tuning offset in semitones (CLAP's `CLAP_NOTE_EXPRESSION_TUNING`, VST3's
+    /// `kTuningTypeID`).
+    ///
+    /// This is MPE's X axis, labelled "Pitch" (or "Glide") by hosts and controllers, sent
+    /// as pitch bend on the note's member channel over plain MIDI. A channel-wide bend from
+    /// a non-MPE source arrives as [`Event::MidiPitchBend`] instead.
     ///
     /// `semitones` is in [-120, +120].
     ///
@@ -104,7 +112,8 @@ pub enum Event {
         semitones: f64,
     },
 
-    /// Per-note vibrato. Rarely (if at all) used by hosts, but part of the CLAP specs.
+    /// Per-note vibrato (CLAP's `CLAP_NOTE_EXPRESSION_VIBRATO`, VST3's `kVibratoTypeID`).
+    /// Rarely (if at all) sent by hosts, but part of both specs.
     ///
     /// `amount` is in [0, 1].
     ///
@@ -118,8 +127,11 @@ pub enum Event {
         amount: f64,
     },
 
-    /// Per-note expression. Rarely (if at all) used by hosts, but part of the CLAP specs.
-    /// You usually want [`Event::PolyBrightness`] instead.
+    /// Per-note expression (CLAP's `CLAP_NOTE_EXPRESSION_EXPRESSION`, VST3's
+    /// `kExpressionTypeID`). Rarely (if at all) sent by hosts, but part of both specs.
+    ///
+    /// This is the breath / expression pedal dimension, *not* MPE's timbre. You usually
+    /// want to use [`Event::PolyBrightness`] instead.
     ///
     /// `amount` is in [0, 1].
     ///
@@ -133,7 +145,11 @@ pub enum Event {
         amount: f64,
     },
 
-    /// Per-note brightness a.k.a. timbre (CLAP brightness / VST3 brightness).
+    /// Per-note brightness a.k.a. timbre (CLAP's `CLAP_NOTE_EXPRESSION_BRIGHTNESS`,
+    /// VST3's `kBrightnessTypeID`).
+    ///
+    /// This is MPE's third dimension: a controller's Y axis, sent as CC74 over plain
+    /// MIDI and labelled "Timbre" (or "Slide") by hosts and controllers.
     ///
     /// `amount` is in [0, 1].
     ///
