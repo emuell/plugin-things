@@ -13,6 +13,9 @@ use super::{component::PluginComponent, plugin::Vst3Plugin};
 /// Same range as CLAP_NOTE_EXPRESSION_TUNING. See also [Event::PolyTuning]'s documented range.
 const TUNING_RANGE_SEMITONES: f64 = 120.0;
 
+/// Same range as CLAP_NOTE_EXPRESSION_VOLUME. See also [Event::PolyVolume]'s documented range.
+const VOLUME_RANGE_GAIN: f64 = 4.0;
+
 /// A description of a standard VST3 note-expression, along with the conversions between its
 /// normalized value and the string the host displays.
 pub(super) struct NoteExpressionDescriptor {
@@ -40,11 +43,11 @@ static NOTE_EXPRESSION_DESCRIPTORS: [NoteExpressionDescriptor; 6] = [
         type_id: kVolumeTypeID,
         title: "Volume",
         short_title: "Volume",
-        units: "",
-        default_value: 1.0,
+        units: "dB",
+        default_value: 0.25, // 0 dB
         is_enabled: NoteExpressions::volume,
-        format: NoteExpressionDescriptor::format_normalized,
-        parse: NoteExpressionDescriptor::parse_normalized,
+        format: |value| format!("{:.2} dB", NoteExpressionDescriptor::normalized_to_db(value)),
+        parse: |string| NoteExpressionDescriptor::parse_number(string).map(NoteExpressionDescriptor::db_to_normalized),
     },
     NoteExpressionDescriptor {
         type_id: kPanTypeID,
@@ -116,22 +119,37 @@ impl NoteExpressionDescriptor {
             .filter(move |descriptor| (descriptor.is_enabled)(&note_expressions))
     }
 
-    // Maps a normalized [0, 1] tuning value to a +- semitones value.
+    /// Maps a normalized [0, 1] volume value to a linear gain in [0, 4], where 1 is 0 dB.
+    pub fn normalized_to_gain(value: NoteExpressionValue) -> f64 {
+        value * VOLUME_RANGE_GAIN
+    }
+
+    /// Maps a normalized [0, 1] volume value to dB. Returns -inf for silence.
+    pub fn normalized_to_db(value: NoteExpressionValue) -> f64 {
+        20.0 * Self::normalized_to_gain(value).log10()
+    }
+
+    /// Maps dB back to a normalized [0, 1] volume value.
+    pub fn db_to_normalized(db: f64) -> NoteExpressionValue {
+        (10f64.powf(db / 20.0) / VOLUME_RANGE_GAIN).clamp(0.0, 1.0)
+    }
+
+    /// Maps a normalized [0, 1] tuning value to a +- semitones value.
     pub fn normalized_to_semitones(value: NoteExpressionValue) -> f64 {
         value * (2.0 * TUNING_RANGE_SEMITONES) - TUNING_RANGE_SEMITONES
     }
 
-    // Maps semitones back to a normalized [0, 1] tuning value.
+    /// Maps semitones back to a normalized [0, 1] tuning value.
     pub fn semitones_to_normalized(semitones: f64) -> NoteExpressionValue {
         ((semitones + TUNING_RANGE_SEMITONES) / (2.0 * TUNING_RANGE_SEMITONES)).clamp(0.0, 1.0)
     }
 
-    // Maps a normalized [0, 1] panning value to [-1, 1], where 0 is center.
+    /// Maps a normalized [0, 1] panning value to [-1, 1], where 0 is center.
     pub fn normalized_to_pan(value: NoteExpressionValue) -> f64 {
         value * 2.0 - 1.0
     }
 
-    // Maps a [-1, 1] panning value back to a normalized [0, 1] value.
+    /// Maps a [-1, 1] panning value back to a normalized [0, 1] value.
     pub fn pan_to_normalized(pan: f64) -> NoteExpressionValue {
         ((pan + 1.0) / 2.0).clamp(0.0, 1.0)
     }
@@ -151,8 +169,8 @@ impl NoteExpressionDescriptor {
         copy_str_to_char16(self.units, &mut info.units);
     }
 
+    /// Parses a string as raw number value, stripping all non numeric characters.
     fn parse_number(string: &str) -> Option<f64> {
-        // Keep only numeric characters, so a displayed value (e.g. "-25.0 %") parses as raw number.
         let digits: String = string.chars().filter(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+')).collect();
         digits.parse::<f64>().ok()
     }

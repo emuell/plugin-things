@@ -111,8 +111,7 @@ impl Iterator for EventIterator<'_> {
                                 channel,
                                 key,
                                 note_id,
-                                // NB: CLAP's PolyVolume is 0..4, where 1 is 0db, so we only use the 0..1 volume range here
-                                gain: value,
+                                gain: NoteExpressionDescriptor::normalized_to_gain(value),
                             })
                         }
                         kPanTypeID if self.note_expressions.pan() => Some(Event::PolyPan {
