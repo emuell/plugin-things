@@ -166,7 +166,8 @@ impl PluginCanvasWindowAdapter {
                 i_slint_core::platform::update_timers_and_animations();
 
                 if self.pending_draw.swap(false, Ordering::Relaxed) {
-                    self.renderer.render().unwrap();
+                    // Ignore the draw outcome as we're constantly drawing anyway
+                    let _ = self.renderer.render().unwrap();
                 }
 
                 EventResponse::Handled
