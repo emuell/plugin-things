@@ -1,5 +1,6 @@
 use std::any::TypeId;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::CStr;
 use std::iter::zip;
 use std::ptr::null_mut;
@@ -17,7 +18,7 @@ use widestring::U16CStr;
 
 use crate::formats::PluginFormat;
 use crate::host::HostInfo;
-use crate::vst3::parameters::{parameter_change_to_event, MidiParameterIds};
+use crate::vst3::parameters::{parameter_change_to_event, MidiParameter};
 use crate::{ParameterId, Parameters, ProcessMode, ProcessState, Processor, ProcessorConfig};
 use crate::editor::NoEditor;
 use crate::parameters::{group::{self, ParameterGroupRef}, has_duplicates, info::ParameterInfo};
@@ -50,8 +51,9 @@ pub struct PluginComponent<P: Vst3Plugin> {
 
     parameter_info: RefCell<Vec<ParameterInfo>>,
     parameter_groups: RefCell<Vec<ParameterGroupRef>>,
-    midi_parameter_ids: RefCell<MidiParameterIds>,
-
+    midi_parameters: RefCell<HashMap<ParamID, MidiParameter>>,
+    midi_parameter_ids: RefCell<HashMap<MidiParameter, ParamID>>,
+ 
     process_mode: RefCell<ProcessMode>,
     processing: AtomicBool,
     tail_length: AtomicU32,
@@ -68,6 +70,7 @@ impl<P: Vst3Plugin + 'static> PluginComponent<P> {
 
             parameter_info: Default::default(),
             parameter_groups: Default::default(),
+            midi_parameters: Default::default(),
             midi_parameter_ids: Default::default(),
 
             process_mode: ProcessMode::default().into(),
@@ -157,40 +160,48 @@ impl<P: Vst3Plugin> IPluginBaseTrait for PluginComponent<P> {
             let user_ids = parameters.ids();
             let mut next_id: ParameterId = 1;
 
-            // Allocate one 16-channel block, pushing hidden ParameterInfos.
-            let mut alloc_block = |infos: &mut Vec<ParameterInfo>, name: &str| -> [ParameterId; 16] {
-                let mut block = [0u32; 16];
-                for (channel, slot) in block.iter_mut().enumerate() {
+            // Allocates one MIDI channel block of hidden parameters, pushing hidden ParameterInfos and filling lookup HashMaps accordingly.
+            let mut alloc_block = |
+                infos: &mut Vec<ParameterInfo>,
+                parameters: &mut HashMap<ParamID, MidiParameter>,
+                parameter_ids: &mut HashMap<MidiParameter, ParamID>,
+                midi_parameter: &dyn Fn(u8) -> MidiParameter,
+                name: &str| {
+                for channel in 0..MIDI_CHANNEL_COUNT {
                     while user_ids.contains(&next_id) {
                         next_id += 1;
                     }
                     infos.push(ParameterInfo::new(next_id, format!("MIDI Channel {} {}", channel + 1, name)).hidden());
-                    *slot = next_id;
+
+                    let midi_parameter = midi_parameter(channel as u8);
+                    parameters.insert(next_id, midi_parameter);
+                    parameter_ids.insert(midi_parameter, next_id);
+
                     next_id += 1;
                 }
-                block
             };
 
-            let mut midi_ids = MidiParameterIds::default();
+            let mut midi_parameters = HashMap::new();
+            let mut midi_parameter_ids = HashMap::new();
 
             if P::MIDI_CAPABILITIES.midi_pitch_bend() {
-                midi_ids.pitch_bend = Some(alloc_block(&mut parameter_infos, "Pitch Bend"));
+                alloc_block(&mut parameter_infos, &mut midi_parameters, &mut midi_parameter_ids, &|channel| MidiParameter::PitchBend { channel }, "Pitch Bend");
             }
 
             if P::MIDI_CAPABILITIES.midi_channel_pressure() {
-                midi_ids.channel_pressure = Some(alloc_block(&mut parameter_infos, "Channel Pressure"));
+                alloc_block(&mut parameter_infos, &mut midi_parameters, &mut midi_parameter_ids, &|channel| MidiParameter::ChannelPressure { channel }, "Channel Pressure");
             }
 
             if P::MIDI_CAPABILITIES.midi_program_change() {
-                midi_ids.program_change = Some(alloc_block(&mut parameter_infos, "Program Change"));
+                alloc_block(&mut parameter_infos, &mut midi_parameters, &mut midi_parameter_ids, &|channel| MidiParameter::ProgramChange { channel }, "Program Change");
             }
 
             for cc in P::MIDI_CAPABILITIES.midi_control_changes() {
-                let block = alloc_block(&mut parameter_infos, &format!("CC {}", cc));
-                midi_ids.cc.insert(cc, block);
+                alloc_block(&mut parameter_infos, &mut midi_parameters, &mut midi_parameter_ids, &|channel| MidiParameter::ControlChange { channel, controller: cc }, &format!("CC {}", cc));
             }
 
-            *self.midi_parameter_ids.borrow_mut() = midi_ids;
+            *self.midi_parameters.borrow_mut() = midi_parameters;
+            *self.midi_parameter_ids.borrow_mut() = midi_parameter_ids;
         });
 
         *self.plugin.borrow_mut() = Some(plugin);
@@ -204,6 +215,8 @@ impl<P: Vst3Plugin> IPluginBaseTrait for PluginComponent<P> {
         *self.plugin.borrow_mut() = None;
         self.parameter_info.borrow_mut().clear();
         self.parameter_groups.borrow_mut().clear();
+        self.midi_parameters.borrow_mut().clear();
+        self.midi_parameter_ids.borrow_mut().clear();
 
         kResultOk
     }
@@ -309,8 +322,8 @@ impl<P: Vst3Plugin> IAudioProcessorTrait for PluginComponent<P> {
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
         let data = unsafe { &mut *data };
 
-        let midi_ids = self.midi_parameter_ids.borrow();
-        let parameter_change_iterator = ParameterChangeIterator::new(data.inputParameterChanges, &midi_ids);
+        let midi_parameters = self.midi_parameters.borrow();
+        let parameter_change_iterator = ParameterChangeIterator::new(data.inputParameterChanges, &midi_parameters);
         let event_iterator = EventIterator::new(data.inputEvents, P::NOTE_EXPRESSIONS);
         let all_events = event_iterator.chain(parameter_change_iterator);
         let is_data_dump = data.inputs.is_null() || data.outputs.is_null() || data.numInputs == 0 || data.numSamples == 0;
@@ -686,7 +699,7 @@ impl<P: Vst3Plugin + 'static> IEditControllerTrait for PluginComponent<P> {
             return kResultFalse;
         };
 
-        let event = parameter_change_to_event(id, value, 0, &self.midi_parameter_ids.borrow());
+        let event = parameter_change_to_event(id, value, 0, &self.midi_parameters.borrow());
         plugin.process_event(&event);
 
         kResultOk
@@ -764,22 +777,22 @@ impl<P: Vst3Plugin> IMidiMappingTrait for PluginComponent<P> {
             return kInvalidArgument;
         }
 
-        let midi_ids = self.midi_parameter_ids.borrow();
+        let channel = channel as u8;
 
-        let block = if midi_controller_number == kPitchBend as i16 {
-            midi_ids.pitch_bend.as_ref()
+        let midi_parameter = if midi_controller_number == kPitchBend as i16 {
+            MidiParameter::PitchBend { channel }
         } else if midi_controller_number == kAfterTouch as i16 {
-            midi_ids.channel_pressure.as_ref()
+            MidiParameter::ChannelPressure { channel }
         } else if midi_controller_number == kCtrlProgramChange as i16 {
-            midi_ids.program_change.as_ref()
+            MidiParameter::ProgramChange { channel }
         } else if (0..MIDI_CONTROLLER_COUNT as i16).contains(&midi_controller_number) {
-            midi_ids.cc.get(&(midi_controller_number as u8))
+            MidiParameter::ControlChange { channel, controller: midi_controller_number as u8 }
         } else {
-            None
+            return kResultFalse;
         };
 
-        if let Some(block) = block {
-            unsafe { *id = block[channel as usize] as _ };
+        if let Some(&parameter_id) = self.midi_parameter_ids.borrow().get(&midi_parameter) {
+            unsafe { *id = parameter_id as _ };
             kResultTrue
         } else {
             kResultFalse

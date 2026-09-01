@@ -1,96 +1,77 @@
 use std::cmp;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use vst3::{ComRef, Steinberg::{kResultOk, Vst::{IParamValueQueueTrait, IParameterChanges, IParameterChangesTrait, ParamID, ParamValue}}};
 
-use crate::{event::Event, ParameterId, midi_capabilities::MIDI_CHANNEL_COUNT};
+use crate::event::Event;
 
-/// Reserved VST3 parameter-ID blocks.
-///
-/// Each block holds 16 hidden parameters, one per MIDI channel.
-#[derive(Default)]
-pub(super) struct MidiParameterIds {
-    pub pitch_bend: Option<[ParameterId; MIDI_CHANNEL_COUNT]>,
-    pub channel_pressure: Option<[ParameterId; MIDI_CHANNEL_COUNT]>,
-    pub program_change: Option<[ParameterId; MIDI_CHANNEL_COUNT]>,
-    pub cc: BTreeMap<u8, [ParameterId; MIDI_CHANNEL_COUNT]>,
+/// A hidden VST3 parameter which maps to a MIDI event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum MidiParameter {
+    PitchBend { channel: u8 },
+    ChannelPressure { channel: u8 },
+    ProgramChange { channel: u8 },
+    ControlChange { channel: u8, controller: u8 },
 }
 
 /// Map a VST3 parameter change event to an `Event`, recognising reserved MIDI blocks.
 ///
-/// Checks pitch-bend, channel-pressure, CC blocks in that order, defaulting to `Event::ParameterValue` for user parameters.
+/// Parameter IDs that belong to a hidden MIDI block resolve to matching `Event::Midi*`.
+/// All others default to `Event::ParameterValue` as regular user parameters.
 pub(super) fn parameter_change_to_event(
     id: ParamID,
     value: ParamValue,
     sample_offset: usize,
-    midi_ids: &MidiParameterIds,
+    midi_parameters: &HashMap<ParamID, MidiParameter>,
 ) -> Event {
-    let channel_of = |ids: Option<&[ParameterId; MIDI_CHANNEL_COUNT]>, id: ParamID| -> Option<u8> {
-        ids.and_then(|ids| ids.iter().position(|&pid| pid == id).map(|pos| pos as u8))
-    };
-
-    // Pitch bend: VST3 normalizes to [0, 1]: map to [-2, +2] semitones
-    if let Some(channel) = channel_of(midi_ids.pitch_bend.as_ref(), id) {
-        let semitones = (value - 0.5) * 4.0;
-        return Event::MidiPitchBend {
+    match midi_parameters.get(&id) {
+        // Pitch bend: VST3 normalizes to [0, 1]: map to [-2, +2] semitones.
+        Some(&MidiParameter::PitchBend { channel }) => Event::MidiPitchBend {
             sample_offset,
             channel,
-            semitones,
-        };
-    }
-
-    // Channel pressure: VST3 normalizes to [0, 1]: passed through as it is.
-    if let Some(channel) = channel_of(midi_ids.channel_pressure.as_ref(), id) {
-        return Event::MidiChannelPressure {
+            semitones: (value - 0.5) * 4.0,
+        },
+        // Channel pressure: VST3 normalizes to [0, 1]: passed through as it is.
+        Some(&MidiParameter::ChannelPressure { channel }) => Event::MidiChannelPressure {
             sample_offset,
             channel,
             value,
-        };
-    }
-
-    // Program change: VST3 normalizes to [0, 1]: round to the nearest program number.
-    if let Some(channel) = channel_of(midi_ids.program_change.as_ref(), id) {
-        let program = (value * 127.0).round() as u8;
-        return Event::MidiProgramChange {
+        },
+        // Program change: VST3 normalizes to [0, 1]: round to the nearest program number.
+        Some(&MidiParameter::ProgramChange { channel }) => Event::MidiProgramChange {
             sample_offset,
             channel,
-            program,
-        };
-    }
-
-    // MIDI CC: VST3 normalizes to [0, 1]: passed through as it is.
-    for (&controller, controller_ids) in &midi_ids.cc {
-        if let Some(channel) = channel_of(Some(controller_ids), id) {
-            return Event::MidiControlChange {
-                sample_offset,
-                channel,
-                controller,
-                value,
-            };
-        }
-    }
-
-    // Fall through to ordinary parameter
-    Event::ParameterValue {
-        sample_offset,
-        id,
-        value,
+            program: (value * 127.0).round() as u8,
+        },
+        // MIDI CC: VST3 normalizes to [0, 1]: passed through as it is.
+        Some(&MidiParameter::ControlChange { channel, controller }) => Event::MidiControlChange {
+            sample_offset,
+            channel,
+            controller,
+            value,
+        },
+        // Ordinary user parameter
+        None => Event::ParameterValue {
+            sample_offset,
+            id,
+            value,
+        },
     }
 }
 
 pub struct ParameterChangeIterator<'a> {
     parameter_changes: Option<ComRef<'a, IParameterChanges>>,
-    midi_parameter_ids: &'a MidiParameterIds,
+    midi_parameters: &'a HashMap<ParamID, MidiParameter>,
     offset: usize,
     index: usize,
     finished: bool,
 }
 
 impl<'a> ParameterChangeIterator<'a> {
-    pub fn new(parameter_changes: *mut IParameterChanges, midi_parameter_ids: &'a MidiParameterIds) -> Self {
+    pub fn new(parameter_changes: *mut IParameterChanges, midi_parameters: &'a HashMap<ParamID, MidiParameter>) -> Self {
         Self {
             parameter_changes: unsafe { ComRef::from_raw(parameter_changes) },
-            midi_parameter_ids,
+            midi_parameters,
             offset: 0,
             index: 0,
             finished: false,
@@ -170,7 +151,7 @@ impl Iterator for ParameterChangeIterator<'_> {
             self.index += 1;
         }
 
-        let event = parameter_change_to_event(id, value, offset, self.midi_parameter_ids);
+        let event = parameter_change_to_event(id, value, offset, self.midi_parameters);
         Some(event)
     }
 }
