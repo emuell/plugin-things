@@ -43,6 +43,9 @@ impl Iterator for EventIterator<'_> {
 
             self.index += 1;
 
+            // Avoid panics when the host passes a negative sample offset and default to 0 instead.
+            let sample_offset = usize::try_from(event.sampleOffset).unwrap_or(0);
+
             let event = match event.r#type as _ {
                 Vst::Event_::EventTypes_::kNoteOnEvent => unsafe {
                     let note_on = event.__field0.noteOn;
@@ -50,11 +53,12 @@ impl Iterator for EventIterator<'_> {
                     // VST3 always supplies a valid channel and key on a note-on, but a wildcard
                     // or out of range value is invalid and should get skipped.
                     let (Some(channel), Some(key)) = (note_channel(note_on.channel), note_key(note_on.pitch)) else {
+                        tracing::debug!("Ignoring note-on with invalid channel {} or key {}", note_on.channel, note_on.pitch);
                         continue;
                     };
 
                     Some(Event::NoteOn {
-                        sample_offset: event.sampleOffset as _,
+                        sample_offset,
                         channel,
                         key,
                         note_id: note_id(note_on.noteId),
@@ -66,7 +70,7 @@ impl Iterator for EventIterator<'_> {
                     let note_off = event.__field0.noteOff;
 
                     Some(Event::NoteOff {
-                        sample_offset: event.sampleOffset as _,
+                        sample_offset,
                         channel: note_channel(note_off.channel),
                         key: note_key(note_off.pitch),
                         note_id: note_id(note_off.noteId),
@@ -79,7 +83,7 @@ impl Iterator for EventIterator<'_> {
                     let poly_pressure = event.__field0.polyPressure;
 
                     Some(Event::PolyPressure {
-                        sample_offset: event.sampleOffset as _,
+                        sample_offset,
                         channel: note_channel(poly_pressure.channel),
                         key: note_key(poly_pressure.pitch),
                         note_id: note_id(poly_pressure.noteId),
@@ -88,7 +92,6 @@ impl Iterator for EventIterator<'_> {
                 },
 
                 Vst::Event_::EventTypes_::kNoteExpressionValueEvent => unsafe {
-                    let sample_offset = event.sampleOffset as usize;
                     let note_expression = event.__field0.noteExpressionValue;
                     let value = note_expression.value;
 
@@ -99,6 +102,7 @@ impl Iterator for EventIterator<'_> {
                     // An expression with a missing note id addresses nothing at all, so skip it.
                     let note_id = note_id(note_expression.noteId);
                     if note_id.is_none() {
+                        tracing::debug!("Ignoring note expression with invalid note id {}", note_expression.noteId);
                         continue;
                     }
 
