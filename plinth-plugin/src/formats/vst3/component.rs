@@ -1,6 +1,5 @@
 use std::any::TypeId;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::ffi::CStr;
 use std::iter::zip;
 use std::ptr::null_mut;
@@ -18,8 +17,8 @@ use widestring::U16CStr;
 
 use crate::formats::PluginFormat;
 use crate::host::HostInfo;
-use crate::vst3::parameters::{parameter_change_to_event, MidiParameter};
-use crate::{ParameterId, Parameters, ProcessMode, ProcessState, Processor, ProcessorConfig};
+use crate::vst3::parameters::{MidiParameter, MidiParameters};
+use crate::{Parameters, ProcessMode, ProcessState, Processor, ProcessorConfig};
 use crate::editor::NoEditor;
 use crate::parameters::{group::{self, ParameterGroupRef}, has_duplicates, info::ParameterInfo};
 use crate::string::{char16_to_string, copy_str_to_char16};
@@ -51,9 +50,8 @@ pub struct PluginComponent<P: Vst3Plugin> {
 
     parameter_info: RefCell<Vec<ParameterInfo>>,
     parameter_groups: RefCell<Vec<ParameterGroupRef>>,
-    midi_parameters: RefCell<HashMap<ParamID, MidiParameter>>,
-    midi_parameter_ids: RefCell<HashMap<MidiParameter, ParamID>>,
- 
+    midi_parameters: RefCell<MidiParameters>,
+
     process_mode: RefCell<ProcessMode>,
     processing: AtomicBool,
     tail_length: AtomicU32,
@@ -71,7 +69,6 @@ impl<P: Vst3Plugin + 'static> PluginComponent<P> {
             parameter_info: Default::default(),
             parameter_groups: Default::default(),
             midi_parameters: Default::default(),
-            midi_parameter_ids: Default::default(),
 
             process_mode: ProcessMode::default().into(),
             processing: AtomicBool::new(false),
@@ -150,59 +147,14 @@ impl<P: Vst3Plugin> IPluginBaseTrait for PluginComponent<P> {
             group::from_parameters(parameters)
         });
 
-        // Allocate hidden reserved VST3 parameters for each MIDI message type the plugin requires via its MIDI_CAPABILITIES.
-        plugin.with_parameters(|parameters| {
-            if !P::HAS_NOTE_INPUT {
-                // MIDI needs a note input port, so allocate nothing without one.
-                return;
-            }
-
-            let user_ids = parameters.ids();
-            let mut next_id: ParameterId = 1;
-
-            // Allocates one MIDI channel block of hidden parameters, pushing hidden ParameterInfos and filling lookup HashMaps accordingly.
-            let mut alloc_block = |
-                infos: &mut Vec<ParameterInfo>,
-                parameters: &mut HashMap<ParamID, MidiParameter>,
-                parameter_ids: &mut HashMap<MidiParameter, ParamID>,
-                midi_parameter: &dyn Fn(u8) -> MidiParameter,
-                name: &str| {
-                for channel in 0..MIDI_CHANNEL_COUNT {
-                    while user_ids.contains(&next_id) {
-                        next_id += 1;
-                    }
-                    infos.push(ParameterInfo::new(next_id, format!("MIDI Channel {} {}", channel + 1, name)).hidden());
-
-                    let midi_parameter = midi_parameter(channel as u8);
-                    parameters.insert(next_id, midi_parameter);
-                    parameter_ids.insert(midi_parameter, next_id);
-
-                    next_id += 1;
-                }
-            };
-
-            let mut midi_parameters = HashMap::new();
-            let mut midi_parameter_ids = HashMap::new();
-
-            if P::MIDI_CAPABILITIES.midi_pitch_bend() {
-                alloc_block(&mut parameter_infos, &mut midi_parameters, &mut midi_parameter_ids, &|channel| MidiParameter::PitchBend { channel }, "Pitch Bend");
-            }
-
-            if P::MIDI_CAPABILITIES.midi_channel_pressure() {
-                alloc_block(&mut parameter_infos, &mut midi_parameters, &mut midi_parameter_ids, &|channel| MidiParameter::ChannelPressure { channel }, "Channel Pressure");
-            }
-
-            if P::MIDI_CAPABILITIES.midi_program_change() {
-                alloc_block(&mut parameter_infos, &mut midi_parameters, &mut midi_parameter_ids, &|channel| MidiParameter::ProgramChange { channel }, "Program Change");
-            }
-
-            for cc in P::MIDI_CAPABILITIES.midi_control_changes() {
-                alloc_block(&mut parameter_infos, &mut midi_parameters, &mut midi_parameter_ids, &|channel| MidiParameter::ControlChange { channel, controller: cc }, &format!("CC {}", cc));
-            }
-
+        // Allocate hidden reserved VST3 parameters for each MIDI message type the plugin requires
+        // via its MIDI_CAPABILITIES. MIDI needs a note input port, so allocate nothing without one.
+        if P::HAS_NOTE_INPUT {
+            let midi_parameters = plugin.with_parameters(|parameters| {
+                MidiParameters::new(&P::MIDI_CAPABILITIES, parameters.ids(), &mut parameter_infos)
+            });
             *self.midi_parameters.borrow_mut() = midi_parameters;
-            *self.midi_parameter_ids.borrow_mut() = midi_parameter_ids;
-        });
+        }
 
         *self.plugin.borrow_mut() = Some(plugin);
 
@@ -216,7 +168,6 @@ impl<P: Vst3Plugin> IPluginBaseTrait for PluginComponent<P> {
         self.parameter_info.borrow_mut().clear();
         self.parameter_groups.borrow_mut().clear();
         self.midi_parameters.borrow_mut().clear();
-        self.midi_parameter_ids.borrow_mut().clear();
 
         kResultOk
     }
@@ -699,7 +650,7 @@ impl<P: Vst3Plugin + 'static> IEditControllerTrait for PluginComponent<P> {
             return kResultFalse;
         };
 
-        let event = parameter_change_to_event(id, value, 0, &self.midi_parameters.borrow());
+        let event = self.midi_parameters.borrow().parameter_change_to_event(id, value, 0);
         plugin.process_event(&event);
 
         kResultOk
@@ -791,7 +742,7 @@ impl<P: Vst3Plugin> IMidiMappingTrait for PluginComponent<P> {
             return kResultFalse;
         };
 
-        if let Some(&parameter_id) = self.midi_parameter_ids.borrow().get(&midi_parameter) {
+        if let Some(parameter_id) = self.midi_parameters.borrow().parameter_id(&midi_parameter) {
             unsafe { *id = parameter_id as _ };
             kResultTrue
         } else {
