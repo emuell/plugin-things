@@ -6,7 +6,7 @@ use vst3::{ComRef, Steinberg::{kResultOk, Vst::{self, IEventList, IEventListTrai
 use crate::formats::midi::{note_channel, note_id, note_key};
 use crate::{Event, NoteExpressions};
 
-use super::note_expression::NoteExpressionDescriptor;
+use super::note_expressions::NoteExpressionDescriptor;
 
 pub struct EventIterator<'a> {
     event_list: Option<ComRef<'a, IEventList>>,
