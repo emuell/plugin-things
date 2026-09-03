@@ -5,6 +5,7 @@ mod factory;
 mod host;
 mod key_codes;
 mod macros;
+mod note_expressions;
 mod parameters;
 mod plugin;
 mod stream;

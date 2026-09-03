@@ -1,6 +1,8 @@
 pub use editor::{Editor, NoEditor};
 pub use error::Error;
 pub use event::Event;
+pub use midi_capabilities::MidiCapabilities;
+pub use note_expressions::NoteExpressions;
 pub use host::{Host, HostInfo};
 pub use formats::{clap, vst3};
 #[cfg(feature = "standalone")]
@@ -32,6 +34,8 @@ mod editor;
 pub mod error;
 mod event;
 mod host;
+mod midi_capabilities;
+mod note_expressions;
 mod formats;
 pub mod parameters;
 mod plugin;

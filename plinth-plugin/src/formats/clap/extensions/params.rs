@@ -142,7 +142,7 @@ impl<P: ClapPlugin> Params<P> {
         PluginInstance::with_plugin_instance(plugin, |instance: &mut PluginInstance<P>| {
             instance.process_events_to_plugin();
 
-            let host_events = EventIterator::new(&instance.parameter_info, unsafe { &*in_events });
+            let host_events = EventIterator::new(&instance.parameter_info, unsafe { &*in_events }, P::MIDI_CAPABILITIES, P::NOTE_EXPRESSIONS);
             let editor_events = instance.parameter_event_map.iter_and_send_to_host(&instance.parameter_info, out_events);
             let all_events = host_events.chain(editor_events);
 

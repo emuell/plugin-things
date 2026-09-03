@@ -12,6 +12,7 @@ license = "MIT"
 standalone = ["dep:cpal", "dep:midir", "dep:winit"]
 
 [dependencies]
+atomic_refcell = "0.1"
 clap-sys = "0.5"
 keyboard-types.workspace = true
 num-derive = "0.4"

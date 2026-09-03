@@ -163,7 +163,7 @@ impl<P: ClapPlugin> PluginInstance<P> {
     }
 
     pub(super) fn send_events_to_plugin(&mut self, in_events: *const clap_input_events) {
-        let events = EventIterator::new(&self.parameter_info, unsafe { &*in_events });
+        let events = EventIterator::new(&self.parameter_info, unsafe { &*in_events }, P::MIDI_CAPABILITIES, P::NOTE_EXPRESSIONS);
 
         for event in events {
             match self.to_plugin_event_sender.push(event) {
@@ -336,7 +336,7 @@ impl<P: ClapPlugin> PluginInstance<P> {
             };
 
             // Process events coming from the host and events coming from the editor
-            let host_events = EventIterator::new(&instance.parameter_info, unsafe { &*process.in_events });
+            let host_events = EventIterator::new(&instance.parameter_info, unsafe { &*process.in_events }, P::MIDI_CAPABILITIES, P::NOTE_EXPRESSIONS);
             let events = host_events.chain(editor_events);
 
             let result = match processor.process(&mut output, aux.as_ref(), transport, events) {

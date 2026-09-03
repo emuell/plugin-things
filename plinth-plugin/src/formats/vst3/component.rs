@@ -6,23 +6,25 @@ use std::ptr::null_mut;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use atomic_refcell::AtomicRefCell;
 use plinth_core::signals::ptr_signal::{PtrSignal, PtrSignalMut};
 use plinth_core::signals::signal::SignalMut;
-use vst3::Steinberg::Vst::ControllerNumbers_::kPitchBend;
-use vst3::Steinberg::Vst::{CtrlNumber, IMidiMapping, IMidiMappingTrait};
+use vst3::Steinberg::Vst::ControllerNumbers_::{kAfterTouch, kCtrlProgramChange, kPitchBend};
+use vst3::Steinberg::Vst::{CtrlNumber, IMidiMapping, IMidiMappingTrait, INoteExpressionController, INoteExpressionPhysicalUIMapping};
 use vst3::{ComPtr, ComRef};
 use vst3::Steinberg::{int16, int32, kInvalidArgument, kNoInterface, kResultFalse, kResultOk, kResultTrue, tresult, uint32, FIDString, FUnknown, IBStream, IPlugView, IPluginBaseTrait, TBool, TUID};
-use vst3::Steinberg::Vst::{kInfiniteTail, kNoParentUnitId, kNoProgramListId, kNoTail, BusDirection, BusDirections_, BusInfo, BusInfo_::BusFlags_, BusTypes_, CString, IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentHandler, IComponentTrait, IEditController, IEditController2, IEditController2Trait, IEditControllerTrait, IHostApplication, IHostApplicationTrait, IProcessContextRequirements, IProcessContextRequirementsTrait, IProcessContextRequirements_, IUnitInfo, IUnitInfoTrait, IoMode, IoModes_, KnobMode, MediaType, MediaTypes_, ParamID, ParamValue, ParameterInfo_, ProcessData, ProcessSetup, ProgramListID, ProgramListInfo, RoutingInfo, SpeakerArr, SpeakerArrangement, String128, SymbolicSampleSizes_, TChar, UnitID, UnitInfo, ViewType::kEditor};
+use vst3::Steinberg::Vst::{kInfiniteTail, kNoParentUnitId, kNoProgramListId, kNoTail, BusDirection, BusDirections, BusDirections_, BusInfo, BusInfo_::BusFlags_, BusTypes_, CString, IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentHandler, IComponentTrait, IEditController, IEditController2, IEditController2Trait, IEditControllerTrait, IHostApplication, IHostApplicationTrait, IProcessContextRequirements, IProcessContextRequirementsTrait, IProcessContextRequirements_, IUnitInfo, IUnitInfoTrait, IoMode, IoModes_, KnobMode, MediaType, MediaTypes, MediaTypes_, ParamID, ParamValue, ParameterInfo_, ProcessData, ProcessSetup, ProgramListID, ProgramListInfo, RoutingInfo, SpeakerArr, SpeakerArrangement, String128, SymbolicSampleSizes_, TChar, UnitID, UnitInfo, ViewType::kEditor};
 use widestring::U16CStr;
 
 use crate::formats::PluginFormat;
 use crate::host::HostInfo;
-use crate::vst3::parameters::parameter_change_to_event;
-use crate::{ParameterId, Parameters, ProcessMode, ProcessState, Processor, ProcessorConfig};
+use crate::vst3::parameters::{MidiParameter, MidiParameters};
+use crate::{Parameters, ProcessMode, ProcessState, Processor, ProcessorConfig};
 use crate::editor::NoEditor;
 use crate::parameters::{group::{self, ParameterGroupRef}, has_duplicates, info::ParameterInfo};
 use crate::string::{char16_to_string, copy_str_to_char16};
 use crate::vst3::{event::EventIterator, parameters::ParameterChangeIterator};
+use crate::midi_capabilities::{MIDI_CHANNEL_COUNT, MIDI_CONTROLLER_COUNT};
 
 use super::{plugin::Vst3Plugin, stream::Stream, view::View};
 
@@ -47,14 +49,16 @@ impl<P: Vst3Plugin> Default for AudioThreadState<P> {
 pub struct PluginComponent<P: Vst3Plugin> {
     plugin: Rc<RefCell<Option<P>>>,
 
-    parameter_info: RefCell<Vec<ParameterInfo>>,
-    parameter_groups: RefCell<Vec<ParameterGroupRef>>,
-    pitch_bend_parameter_ids: RefCell<[ParameterId; 16]>,
+    // NB: AtomicRefCell instead of RefCell because parameter info may be read concurrently (UI and audio)
+    parameter_info: AtomicRefCell<Vec<ParameterInfo>>,
+    parameter_groups: AtomicRefCell<Vec<ParameterGroupRef>>,
+    midi_parameters: AtomicRefCell<MidiParameters>,
 
-    process_mode: RefCell<ProcessMode>,
+    process_mode: AtomicRefCell<ProcessMode>,
     processing: AtomicBool,
     tail_length: AtomicU32,
     latency: AtomicU32,
+
     component_handler: Rc<RefCell<Option<ComPtr<IComponentHandler>>>>,
 
     audio_thread_state: AudioThreadState<P>,
@@ -67,7 +71,7 @@ impl<P: Vst3Plugin + 'static> PluginComponent<P> {
 
             parameter_info: Default::default(),
             parameter_groups: Default::default(),
-            pitch_bend_parameter_ids: Default::default(),
+            midi_parameters: Default::default(),
 
             process_mode: ProcessMode::default().into(),
             processing: AtomicBool::new(false),
@@ -92,7 +96,7 @@ impl<P: Vst3Plugin + 'static> PluginComponent<P> {
 }
 
 impl<P: Vst3Plugin> vst3::Class for PluginComponent<P> {
-    type Interfaces = (IAudioProcessor, IComponent, IComponent, IEditController, IEditController2, IMidiMapping, IProcessContextRequirements, IUnitInfo);
+    type Interfaces = (IAudioProcessor, IComponent, IComponent, IEditController, IEditController2, IMidiMapping, IProcessContextRequirements, IUnitInfo, INoteExpressionController, INoteExpressionPhysicalUIMapping);
 }
 
 impl<P: Vst3Plugin> IPluginBaseTrait for PluginComponent<P> {
@@ -146,25 +150,14 @@ impl<P: Vst3Plugin> IPluginBaseTrait for PluginComponent<P> {
             group::from_parameters(parameters)
         });
 
-        // Create parameters for MIDI pitch bend messages
-        plugin.with_parameters(|parameters| {
-            let mut parameter_id = 1;
-            let ids = parameters.ids();
-
-            for (channel, pitch_bend_parameter_id) in self.pitch_bend_parameter_ids.borrow_mut().iter_mut().enumerate() {
-                while ids.contains(&parameter_id) {
-                    parameter_id += 1;
-                }
-
-                let info = ParameterInfo::new(parameter_id, format!("MIDI Channel {} Pitch Bend", channel + 1))
-                    .hidden();
-
-                parameter_infos.push(info);
-
-                *pitch_bend_parameter_id = parameter_id;
-                parameter_id += 1;
-            }
-        });
+        // Allocate hidden reserved VST3 parameters for each MIDI message type the plugin requires
+        // via its MIDI_CAPABILITIES. MIDI needs a note input port, so allocate nothing without one.
+        if P::HAS_NOTE_INPUT {
+            let midi_parameters = plugin.with_parameters(|parameters| {
+                MidiParameters::new(&P::MIDI_CAPABILITIES, parameters.ids(), &mut parameter_infos)
+            });
+            *self.midi_parameters.borrow_mut() = midi_parameters;
+        }
 
         *self.plugin.borrow_mut() = Some(plugin);
 
@@ -177,6 +170,7 @@ impl<P: Vst3Plugin> IPluginBaseTrait for PluginComponent<P> {
         *self.plugin.borrow_mut() = None;
         self.parameter_info.borrow_mut().clear();
         self.parameter_groups.borrow_mut().clear();
+        self.midi_parameters.borrow_mut().clear();
 
         kResultOk
     }
@@ -282,8 +276,9 @@ impl<P: Vst3Plugin> IAudioProcessorTrait for PluginComponent<P> {
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
         let data = unsafe { &mut *data };
 
-        let parameter_change_iterator = ParameterChangeIterator::new(data.inputParameterChanges, *self.pitch_bend_parameter_ids.borrow());
-        let event_iterator = EventIterator::new(data.inputEvents);
+        let midi_parameters = self.midi_parameters.borrow();
+        let parameter_change_iterator = ParameterChangeIterator::new(data.inputParameterChanges, &midi_parameters);
+        let event_iterator = EventIterator::new(data.inputEvents, P::NOTE_EXPRESSIONS);
         let all_events = event_iterator.chain(parameter_change_iterator);
         let is_data_dump = data.inputs.is_null() || data.outputs.is_null() || data.numInputs == 0 || data.numSamples == 0;
 
@@ -401,12 +396,24 @@ impl<P: Vst3Plugin> IComponentTrait for PluginComponent<P> {
     unsafe fn getBusCount(&self, media_type: MediaType, dir: BusDirection) -> int32 {
         tracing::trace!("IComponent::getBusCount");
 
-        // On some platforms, these casts are needed
-        #[allow(clippy::unnecessary_cast)]
-        if P::HAS_AUX_INPUT && media_type == MediaTypes_::kAudio as i32 && dir == BusDirections_::kInput as i32 {
-            2
-        } else {
-            1
+        let is_input = dir as BusDirections == BusDirections_::kInput;
+
+        match media_type as MediaTypes {
+            MediaTypes_::kAudio => {
+                if is_input && P::HAS_AUX_INPUT {
+                    2
+                } else {
+                    1
+                }
+            }
+            MediaTypes_::kEvent => {
+                if is_input {
+                    P::HAS_NOTE_INPUT as int32
+                } else {
+                    P::HAS_NOTE_OUTPUT as int32
+                }
+            }
+            _ => 0
         }
     }
 
@@ -646,7 +653,7 @@ impl<P: Vst3Plugin + 'static> IEditControllerTrait for PluginComponent<P> {
             return kResultFalse;
         };
 
-        let event = parameter_change_to_event(id, value, 0, &self.pitch_bend_parameter_ids.borrow());
+        let event = self.midi_parameters.borrow().parameter_change_to_event(id, value, 0);
         plugin.process_event(&event);
 
         kResultOk
@@ -720,16 +727,30 @@ impl<P: Vst3Plugin> IMidiMappingTrait for PluginComponent<P> {
         if bus_index != 0 {
             return kResultFalse;
         }
-        if midi_controller_number != kPitchBend as i16 {
-            return kResultFalse;
-        }
-        if !(0..16).contains(&channel) {
+        if !(0..MIDI_CHANNEL_COUNT as i16).contains(&channel) {
             return kInvalidArgument;
         }
 
-        unsafe { *id = self.pitch_bend_parameter_ids.borrow()[channel as usize] as _ };
+        let channel = channel as u8;
 
-        kResultTrue
+        let midi_parameter = if midi_controller_number == kPitchBend as i16 {
+            MidiParameter::PitchBend { channel }
+        } else if midi_controller_number == kAfterTouch as i16 {
+            MidiParameter::ChannelPressure { channel }
+        } else if midi_controller_number == kCtrlProgramChange as i16 {
+            MidiParameter::ProgramChange { channel }
+        } else if (0..MIDI_CONTROLLER_COUNT as i16).contains(&midi_controller_number) {
+            MidiParameter::ControlChange { channel, controller: midi_controller_number as u8 }
+        } else {
+            return kResultFalse;
+        };
+
+        if let Some(parameter_id) = self.midi_parameters.borrow().parameter_id(&midi_parameter) {
+            unsafe { *id = parameter_id as _ };
+            kResultTrue
+        } else {
+            kResultFalse
+        }
     }
 }
 
