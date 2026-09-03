@@ -6,6 +6,7 @@ use std::ptr::null_mut;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use atomic_refcell::AtomicRefCell;
 use plinth_core::signals::ptr_signal::{PtrSignal, PtrSignalMut};
 use plinth_core::signals::signal::SignalMut;
 use vst3::Steinberg::Vst::ControllerNumbers_::{kAfterTouch, kCtrlProgramChange, kPitchBend};
@@ -48,14 +49,16 @@ impl<P: Vst3Plugin> Default for AudioThreadState<P> {
 pub struct PluginComponent<P: Vst3Plugin> {
     plugin: Rc<RefCell<Option<P>>>,
 
-    parameter_info: RefCell<Vec<ParameterInfo>>,
-    parameter_groups: RefCell<Vec<ParameterGroupRef>>,
-    midi_parameters: RefCell<MidiParameters>,
+    // NB: AtomicRefCell instead of RefCell because parameter info may be read concurrently (UI and audio)
+    parameter_info: AtomicRefCell<Vec<ParameterInfo>>,
+    parameter_groups: AtomicRefCell<Vec<ParameterGroupRef>>,
+    midi_parameters: AtomicRefCell<MidiParameters>,
 
-    process_mode: RefCell<ProcessMode>,
+    process_mode: AtomicRefCell<ProcessMode>,
     processing: AtomicBool,
     tail_length: AtomicU32,
     latency: AtomicU32,
+
     component_handler: Rc<RefCell<Option<ComPtr<IComponentHandler>>>>,
 
     audio_thread_state: AudioThreadState<P>,
