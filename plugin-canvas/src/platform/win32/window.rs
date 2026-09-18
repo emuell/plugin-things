@@ -1,19 +1,19 @@
 use std::collections::HashSet;
 use std::num::NonZero;
 use std::sync::Weak;
-use std::{cell::RefCell, ffi::OsString, mem::{size_of, transmute}, num::NonZeroIsize, os::windows::prelude::OsStringExt, ptr::{null, null_mut}, sync::{atomic::{AtomicBool, Ordering}, Arc}, time::Duration};
+use std::{cell::{Cell, RefCell}, ffi::OsString, mem::{size_of, transmute}, num::NonZeroIsize, os::windows::prelude::OsStringExt, ptr::{null, null_mut}, sync::{atomic::{AtomicBool, Ordering}, Arc}, time::Duration};
 
 use cursor_icon::CursorIcon;
 use keyboard_types::Code;
 use portable_atomic::AtomicF64;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle, Win32WindowHandle};
 use uuid::Uuid;
-use windows::Win32::UI::WindowsAndMessaging::{GetParent, WM_CANCELMODE, WM_SETFOCUS, WM_SETCURSOR};
+use windows::Win32::UI::WindowsAndMessaging::{GetParent, GetQueueStatus, QS_INPUT, QS_PAINT, QS_TIMER, WM_CANCELMODE, WM_SETFOCUS, WM_SETCURSOR};
 use windows::{core::PCWSTR, Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_LWIN, VK_RWIN}};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM, GetLastError};
 use windows::Win32::Graphics::{Dwm::{DwmFlush, DwmIsCompositionEnabled}, Dxgi::{CreateDXGIFactory, IDXGIFactory, IDXGIOutput}, Gdi::{ClientToScreen, MonitorFromWindow, ScreenToClient, HBRUSH, MONITOR_DEFAULTTOPRIMARY}};
 use windows::Win32::System::Ole::{IDropTarget, OleInitialize, RegisterDragDrop, RevokeDragDrop};
-use windows::Win32::UI::{Controls::WM_MOUSELEAVE, Input::KeyboardAndMouse::{GetAsyncKeyState, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL, VK_MENU, VK_SHIFT}, WindowsAndMessaging::{CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, LoadCursorW, MoveWindow, RegisterClassW, SendMessageW, SetCursor, SetCursorPos, SetWindowLongPtrW, ShowCursor, UnregisterClassW, CS_OWNDC, GWLP_USERDATA, HICON, IDC_ARROW, WINDOW_EX_STYLE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WNDCLASSW, WS_CHILD, WS_VISIBLE}};
+use windows::Win32::UI::{Controls::WM_MOUSELEAVE, Input::KeyboardAndMouse::{GetAsyncKeyState, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL, VK_MENU, VK_SHIFT}, WindowsAndMessaging::{CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, LoadCursorW, MoveWindow, PostMessageW, RegisterClassW, SetCursor, SetCursorPos, SetWindowLongPtrW, ShowCursor, UnregisterClassW, CS_OWNDC, GWLP_USERDATA, HICON, IDC_ARROW, WINDOW_EX_STYLE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WNDCLASSW, WS_CHILD, WS_VISIBLE}};
 
 use crate::thread_bound::ThreadBound;
 use crate::{dimensions::Size, error::Error, event::{Event, EventCallback, EventResponse, MouseButton}, keyboard::KeyboardModifiers, platform::{interface::OsWindowInterface, os_window_handle::OsWindowHandle}, window::WindowAttributes, LogicalPosition, LogicalSize, PhysicalPosition};
@@ -33,6 +33,8 @@ pub struct OsWindow {
 
     running: Arc<AtomicBool>,
     moved: Arc<AtomicBool>,
+    frame_pending: Arc<AtomicBool>,
+    skipped_frame: Cell<bool>,
     scale: AtomicF64,
 
     keyboard_modifiers: RefCell<KeyboardModifiers>,
@@ -176,14 +178,7 @@ impl OsWindowInterface for OsWindow {
 
         let running: Arc<AtomicBool> = Arc::new(true.into());
         let moved: Arc<AtomicBool> = Arc::new(false.into());
-
-        std::thread::spawn({
-            let hwnd = hwnd.0 as usize;
-            let running = running.clone();
-            let moved = moved.clone();
-
-            move || frame_pacing_thread(hwnd, running, moved)
-        });
+        let frame_pending: Arc<AtomicBool> = Arc::new(false.into());
 
         let message_window = Arc::new(MessageWindow::new(hwnd).unwrap());
 
@@ -207,6 +202,8 @@ impl OsWindowInterface for OsWindow {
 
             running,
             moved,
+            frame_pending,
+            skipped_frame: Default::default(),
             scale: window_attributes.scale().into(),
 
             keyboard_modifiers: Default::default(),
@@ -224,6 +221,16 @@ impl OsWindowInterface for OsWindow {
         *window.drop_target.borrow_mut() = Some(drop_target);
 
         unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, Arc::downgrade(&window).into_raw() as _) };
+
+        // Start frame pacing (after the context has been set via GWLP_USERDATA)
+        std::thread::spawn({
+            let hwnd = hwnd.0 as usize;
+            let running = window.running.clone();
+            let moved = window.moved.clone();
+            let frame_pending = window.frame_pending.clone();
+
+            move || frame_pacing_thread(hwnd, running, moved, frame_pending)
+        });
 
         Ok(OsWindowHandle::new(window))
     }
@@ -466,8 +473,16 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             }
 
             WM_APP_FRAME_TIMER => {
-                window.update_modifiers();
-                window.send_event(Event::Draw);
+                // Only yield one frame when other timer messages are pending
+                let messages_pending = unsafe { GetQueueStatus(QS_INPUT | QS_PAINT | QS_TIMER) } >> 16 != 0;
+                if messages_pending && !window.skipped_frame.get() {
+                    window.skipped_frame.set(true);
+                } else {
+                    window.skipped_frame.set(false);
+                    window.update_modifiers();
+                    window.send_event(Event::Draw);
+                }
+                window.frame_pending.store(false, Ordering::Release);
 
                 LRESULT(0)
             }
@@ -512,7 +527,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     result
 }
 
-fn frame_pacing_thread(hwnd: usize, running: Arc<AtomicBool>, moved: Arc<AtomicBool>) {
+fn frame_pacing_thread(hwnd: usize, running: Arc<AtomicBool>, moved: Arc<AtomicBool>, frame_pending: Arc<AtomicBool>) {
     let hwnd = HWND(hwnd as _);
     let mut maybe_output: Option<IDXGIOutput> = None;
 
@@ -533,8 +548,14 @@ fn frame_pacing_thread(hwnd: usize, running: Arc<AtomicBool>, moved: Arc<AtomicB
                 std::thread::sleep(Duration::from_millis(10));
             }
 
-            // Send draw message
-            SendMessageW(hwnd, WM_APP_FRAME_TIMER, None, None);
+            // NB: Post instead of send: sent messages are handled inside the host's `PeekMessage`, which
+            // only returns as soon as there are no more pending messages, so several open windows could
+            // keep it from ever returning. Also don't post again until the last frame message was picked up.
+            if !frame_pending.swap(true, Ordering::AcqRel)
+                && PostMessageW(Some(hwnd), WM_APP_FRAME_TIMER, WPARAM(0), LPARAM(0)).is_err()
+            {
+                frame_pending.store(false, Ordering::Release);
+            }
         }
     }
 }
