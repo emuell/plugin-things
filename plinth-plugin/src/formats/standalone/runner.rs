@@ -1,9 +1,9 @@
-use std::{rc::Rc, sync::{Arc, mpsc}, time::{Duration, Instant}};
+use std::{cell::Cell, rc::Rc, sync::{Arc, mpsc}, time::{Duration, Instant}};
 
 use cpal::{BufferSize, FromSample, I24, SizedSample, Stream, StreamConfig, traits::{DeviceTrait, StreamTrait}};
 use midir::MidiInputConnection;
 use raw_window_handle::HasWindowHandle;
-use winit::{application::ApplicationHandler, event::WindowEvent, event_loop::{ActiveEventLoop, ControlFlow, EventLoop}, window::{Window, WindowAttributes, WindowId}};
+use winit::{application::ApplicationHandler, dpi::{LogicalSize, PhysicalSize, Size}, event::WindowEvent, event_loop::{ActiveEventLoop, ControlFlow, EventLoop}, window::{Window, WindowAttributes, WindowId}};
 
 use super::{parameters::StandaloneParameterEventMap, audio::AudioState, config::{AudioOutputConfig, MidiInputConfig}, host::StandaloneHost, midi, plugin::StandalonePlugin};
 
@@ -14,6 +14,7 @@ struct StandaloneRunner<P: StandalonePlugin> {
     editor: P::Editor,
     title: &'static str,
     window: Option<Window>,
+    requested_window_size: Rc<Cell<Option<(f64, f64)>>>,
     last_frame: Instant,
     audio_stream: Stream,
     midi_connections: Vec<MidiInputConnection<()>>,
@@ -23,6 +24,7 @@ impl<P: StandalonePlugin> StandaloneRunner<P> {
     fn new(
         plugin: Rc<P>,
         editor: P::Editor,
+        requested_window_size: Rc<Cell<Option<(f64, f64)>>>,
         audio_stream: Stream,
         midi_connections: Vec<MidiInputConnection<()>>,
     ) -> Self {
@@ -31,9 +33,32 @@ impl<P: StandalonePlugin> StandaloneRunner<P> {
             editor,
             title: P::NAME,
             window: None,
+            requested_window_size,
             last_frame: Instant::now(),
             audio_stream,
             midi_connections,
+        }
+    }
+
+    fn editor_size(window: &Window, size: PhysicalSize<u32>) -> (f64, f64) {
+        // Editor sizes are physical pixels, except on macOS, where the plugin view applies the
+        // system's DPI scale and sizes are logical points.
+        if cfg!(target_os = "macos") {
+            size.to_logical::<f64>(window.scale_factor()).into()
+        } else {
+            size.cast::<f64>().into()
+        }
+    }
+
+    fn request_window_size(window: &Window, editor_size: (f64, f64)) {
+        let new_size: Size = if cfg!(target_os = "macos") {
+            LogicalSize::<f64>::from(editor_size).into()
+        } else {
+            PhysicalSize::<u32>::from(editor_size).into()
+        };
+        let new_physical_size = new_size.to_physical::<u32>(window.scale_factor());
+        if window.request_inner_size(new_size).is_some_and(|applied_size| applied_size != new_physical_size) {
+            tracing::warn!("Failed to apply new standalone editor window size");
         }
     }
 }
@@ -51,7 +76,7 @@ impl<P: StandalonePlugin> ApplicationHandler for StandaloneRunner<P> {
         let (default_width, default_height) = P::Editor::DEFAULT_SIZE;
         let attrs = WindowAttributes::default()
             .with_title(self.title)
-            .with_inner_size(winit::dpi::LogicalSize::new(default_width, default_height))
+            .with_inner_size(LogicalSize::new(default_width, default_height))
             .with_resizable(self.editor.can_resize());
 
         let window = match event_loop.create_window(attrs) {
@@ -67,12 +92,9 @@ impl<P: StandalonePlugin> ApplicationHandler for StandaloneRunner<P> {
         if !cfg!(target_os = "macos") {
             // On macOS the system's DPI scale already is applied in the plugin view
             self.editor.set_scale(window.scale_factor());
-            // Resize window, in case editor uses a custom scaling factor
-            let new_size = winit::dpi::PhysicalSize::<u32>::from(self.editor.window_size());
-            if window.request_inner_size(new_size).is_some_and(|applied_size| applied_size != new_size) {
-                tracing::warn!("Failed to apply new standalone editor window size");
-            }
         }
+        // Resize window, in case editor uses a custom scaling factor
+        Self::request_window_size(&window, self.editor.window_size());
 
         // Attach editor to the window
         let handle = window
@@ -89,26 +111,48 @@ impl<P: StandalonePlugin> ApplicationHandler for StandaloneRunner<P> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        if let WindowEvent::CloseRequested = event {
-            self.editor.close();
-            event_loop.exit();
-        } else if let WindowEvent::ScaleFactorChanged {
-            scale_factor,
-            inner_size_writer: _,
-        } = event
-        {
-            #[allow(clippy::collapsible_if)]
-            if !cfg!(target_os = "macos") {
-                // see `resumed`impl
-                self.editor.set_scale(scale_factor);
-                // apply new window size, if needed
-                if let Some(window) = &self.window {
-                    let new_size = winit::dpi::PhysicalSize::<u32>::from(self.editor.window_size());
-                    if window.request_inner_size(new_size).is_some_and(|applied_size| applied_size != new_size) {
+        match event {
+            WindowEvent::CloseRequested => {
+                self.editor.close();
+                event_loop.exit();
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, mut inner_size_writer } => {
+                if !cfg!(target_os = "macos") {
+                    // see `resumed`impl
+                    self.editor.set_scale(scale_factor);
+                    // apply new window size, if needed
+                    let new_size = PhysicalSize::<u32>::from(self.editor.window_size());
+                    if inner_size_writer.request_inner_size(new_size).is_err() {
                         tracing::warn!("Failed to apply new standalone editor window size");
                     }
                 }
             }
+            WindowEvent::Resized(_) => {
+                let Some(window) = &self.window else {
+                    return;
+                };
+                let inner_size = window.inner_size();
+                // Minimized windows report a zero size on Windows: ignore those.
+                if inner_size.width == 0 || inner_size.height == 0 {
+                    return;
+                }
+                let size = Self::editor_size(window, inner_size);
+                let Some(supported_size) = self.editor.check_window_size(size) else {
+                    return;
+                };
+                // Requesting a size un-maximizes the window on Windows, so let the editor fit
+                // itself into maximized and fullscreen windows instead.
+                let needs_correction = (supported_size.0 - size.0).abs() > 1.0
+                    || (supported_size.1 - size.1).abs() > 1.0;
+                let new_size = if needs_correction && !window.is_maximized() && window.fullscreen().is_none() {
+                    Self::request_window_size(window, supported_size);
+                    supported_size
+                } else {
+                    size
+                };
+                self.editor.set_window_size(new_size.0, new_size.1);
+            }
+            _ => {}
         }
     }
 
@@ -123,6 +167,13 @@ impl<P: StandalonePlugin> ApplicationHandler for StandaloneRunner<P> {
         if now >= self.last_frame + frame_interval {
             self.editor.on_frame();
             self.last_frame = now;
+        }
+
+        // Apply pending requests from `StandaloneHost::resize_view`
+        if let Some(size) = self.requested_window_size.take()
+            && let Some(window) = &self.window
+        {
+            Self::request_window_size(window, size);
         }
 
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.last_frame + frame_interval));
@@ -281,14 +332,15 @@ pub fn run_standalone_with_config<P: StandalonePlugin + 'static>(
     .expect("Failed to build audio output stream");
 
     // Create host and editor
-    let host = Rc::new(StandaloneHost::new(plugin.clone(), parameter_event_map));
+    let requested_window_size = Rc::new(Cell::new(None));
+    let host = Rc::new(StandaloneHost::new(plugin.clone(), parameter_event_map, requested_window_size.clone()));
     let editor = plugin.create_editor(host as Rc<dyn Host>);
 
     // Create winit event loop
     let event_loop = EventLoop::new().expect("Failed to create event loop");
 
     // Run winit event loop (blocks until window is closed)
-    let mut runner = StandaloneRunner::new(plugin, editor, audio_stream, midi_connections);
+    let mut runner = StandaloneRunner::new(plugin, editor, requested_window_size, audio_stream, midi_connections);
 
     event_loop.run_app(&mut runner).expect("Event loop error");
 }

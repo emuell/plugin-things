@@ -1,4 +1,4 @@
-use std::{rc::Rc, sync::Arc};
+use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use crate::{Host, ParameterId, ParameterValue, Parameters, Plugin};
 
@@ -7,24 +7,31 @@ use super::parameters::StandaloneParameterEventMap;
 pub struct StandaloneHost<P: Plugin> {
     plugin: Rc<P>,
     parameter_event_map: Arc<StandaloneParameterEventMap>,
+    requested_window_size: Rc<Cell<Option<(f64, f64)>>>,
 }
 
 impl<P: Plugin> StandaloneHost<P> {
-    pub fn new(plugin: Rc<P>, parameter_event_map: Arc<StandaloneParameterEventMap>) -> Self {
+    pub fn new(
+        plugin: Rc<P>,
+        parameter_event_map: Arc<StandaloneParameterEventMap>,
+        requested_window_size: Rc<Cell<Option<(f64, f64)>>>,
+    ) -> Self {
         Self {
             plugin,
             parameter_event_map,
+            requested_window_size,
         }
     }
 }
 
 impl<P: Plugin> Host for StandaloneHost<P> {
     fn can_resize(&self) -> bool {
-        false
+        true
     }
 
-    fn resize_view(&self, _width: f64, _height: f64) -> bool {
-        false
+    fn resize_view(&self, width: f64, height: f64) -> bool {
+        self.requested_window_size.set(Some((width, height)));
+        true
     }
 
     fn change_parameter_value(&self, id: ParameterId, normalized: ParameterValue) {
