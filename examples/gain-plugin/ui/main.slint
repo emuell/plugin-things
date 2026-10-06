@@ -6,8 +6,8 @@ export struct UiParameter {
 }
 
 export component PluginWindow inherits Window {
-    width: 400px;
-    height: 300px;
+    preferred-width: 400px;
+    preferred-height: 300px;
 
     in property <UiParameter> gain;
 
@@ -16,6 +16,8 @@ export component PluginWindow inherits Window {
     callback end-parameter-change(int);    
 
     Text {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
         text: gain.display-value;
         font-size: 40px;
 
