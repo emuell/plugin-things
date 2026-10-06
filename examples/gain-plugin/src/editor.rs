@@ -7,12 +7,14 @@ use crate::{parameters::GainParameters, view::GainPluginView};
 
 pub struct EditorSettings {
     pub scale: f64,
+    pub size: (f64, f64),
 }
 
 impl Default for EditorSettings {
     fn default() -> Self {
         Self {
             scale: Window::default_scale(),
+            size: GainPluginEditor::DEFAULT_SIZE,
         }
     }
 }
@@ -25,6 +27,10 @@ pub struct GainPluginEditor {
 }
 
 impl GainPluginEditor {
+    const MIN_SIZE: (f64, f64) = (200.0, 150.0);
+    const MAX_SIZE: (f64, f64) = (600.0, 450.0);
+    const DEFAULT_SIZE: (f64, f64) = (400.0, 300.0);
+
     pub fn new(host: Rc<dyn Host>, parameters: Rc<GainParameters>, settings: Rc<RefCell<EditorSettings>>) -> Self {
         Self {
             host,
@@ -36,12 +42,36 @@ impl GainPluginEditor {
 }
 
 impl Editor for GainPluginEditor {
-    const DEFAULT_SIZE: (f64, f64) = (400.0, 300.0);
+    const DEFAULT_SIZE: (f64, f64) = GainPluginEditor::DEFAULT_SIZE;
 
     fn window_size(&self) -> (f64, f64) {
+        let settings = self.settings.borrow();
+        let (width, height) = settings.size;
+        (width * settings.scale, height * settings.scale)
+    }
+
+    fn can_resize(&self) -> bool {
+        true
+    }
+
+    fn check_window_size(&self, size: (f64, f64)) -> Option<(f64, f64)> {
         let scale = self.settings.borrow().scale;
 
-        (Self::DEFAULT_SIZE.0 * scale, Self::DEFAULT_SIZE.1 * scale)
+        Some((
+            size.0.min(Self::MAX_SIZE.0 * scale).max(Self::MIN_SIZE.0 * scale),
+            size.1.min(Self::MAX_SIZE.1 * scale).max(Self::MIN_SIZE.1 * scale),
+        ))
+    }
+
+    fn set_window_size(&self, width: f64, height: f64) {
+        {
+            let mut settings = self.settings.borrow_mut();
+            settings.size = (width / settings.scale, height / settings.scale);
+        }
+
+        if let Some(editor_handle) = self.editor_handle.as_ref() {
+            editor_handle.set_window_size(width, height);
+        }
     }
 
     fn set_scale(&self, scale: f64) {
@@ -59,11 +89,14 @@ impl Editor for GainPluginEditor {
         // Drop old editor instance first
         self.close();
 
-        let scale = self.settings.borrow().scale;
+        let (size, scale) = {
+            let settings = self.settings.borrow();
+            (settings.size, settings.scale)
+        };
 
         let editor_handle = SlintEditor::open(
             parent,
-            WindowAttributes::new(Self::DEFAULT_SIZE.into(), scale),
+            WindowAttributes::new(size.into(), scale),
             {
                 let parameters = self.parameters.clone();
                 let host = self.host.clone();
