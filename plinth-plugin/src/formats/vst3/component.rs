@@ -13,7 +13,7 @@ use vst3::Steinberg::Vst::ControllerNumbers_::{kAfterTouch, kCtrlProgramChange, 
 use vst3::Steinberg::Vst::{CtrlNumber, IMidiMapping, IMidiMappingTrait, INoteExpressionController, INoteExpressionPhysicalUIMapping};
 use vst3::{ComPtr, ComRef};
 use vst3::Steinberg::{int16, int32, kInvalidArgument, kNoInterface, kResultFalse, kResultOk, kResultTrue, tresult, uint32, FIDString, FUnknown, IBStream, IPlugView, IPluginBaseTrait, TBool, TUID};
-use vst3::Steinberg::Vst::{kInfiniteTail, kNoParentUnitId, kNoProgramListId, kNoTail, BusDirection, BusDirections, BusDirections_, BusInfo, BusInfo_::BusFlags_, BusTypes_, CString, IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentHandler, IComponentTrait, IEditController, IEditController2, IEditController2Trait, IEditControllerTrait, IHostApplication, IHostApplicationTrait, IProcessContextRequirements, IProcessContextRequirementsTrait, IProcessContextRequirements_, IUnitInfo, IUnitInfoTrait, IoMode, IoModes_, KnobMode, MediaType, MediaTypes, MediaTypes_, ParamID, ParamValue, ParameterInfo_, ProcessData, ProcessSetup, ProgramListID, ProgramListInfo, RoutingInfo, SpeakerArr, SpeakerArrangement, String128, SymbolicSampleSizes_, TChar, UnitID, UnitInfo, ViewType::kEditor};
+use vst3::Steinberg::Vst::{kInfiniteTail, kNoParentUnitId, kNoProgramListId, kNoTail, BusDirection, BusDirections, BusDirections_, BusInfo, BusInfo_::BusFlags_, BusTypes_, CString, IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentHandler, IComponentTrait, IEditController, IEditController2, IEditController2Trait, IEditControllerTrait, IHostApplication, IHostApplicationTrait, IProcessContextRequirements, IProcessContextRequirementsTrait, IProcessContextRequirements_, IUnitInfo, IUnitInfoTrait, IoMode, IoModes_, KnobMode, MediaType, MediaTypes, MediaTypes_, ParamID, ParamValue, ParameterInfo_, ProcessData, ProcessModes_, ProcessSetup, ProgramListID, ProgramListInfo, RoutingInfo, SpeakerArr, SpeakerArrangement, String128, SymbolicSampleSizes_, TChar, UnitID, UnitInfo, ViewType::kEditor};
 use widestring::U16CStr;
 
 use crate::formats::PluginFormat;
@@ -237,11 +237,22 @@ impl<P: Vst3Plugin> IAudioProcessorTrait for PluginComponent<P> {
 
         let setup = unsafe { &*setup };
 
+        // Override the rarely used setIoMode with the process mode reported in the processing setup
+        let process_mode = match setup.processMode as _ {
+            // Treat kPrefetch as live playback, as it happens during live playback
+            ProcessModes_::kRealtime | ProcessModes_::kPrefetch => *self.process_mode.borrow(),
+            ProcessModes_::kOffline => ProcessMode::Offline,
+            mode => {
+                tracing::warn!("Invalid VST3 process mode: {mode}");
+                *self.process_mode.borrow()
+            }
+        };
+
         let processor_config = ProcessorConfig {
             sample_rate: setup.sampleRate,
             min_block_size: 0,
             max_block_size: setup.maxSamplesPerBlock as _,
-            process_mode: *self.process_mode.borrow(),
+            process_mode,
         };
 
         let plugin = self.plugin.borrow();
