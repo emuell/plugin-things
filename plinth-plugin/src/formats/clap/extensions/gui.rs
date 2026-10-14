@@ -169,9 +169,15 @@ impl<P: ClapPlugin> Gui<P> {
         })
     }
 
-    unsafe extern "C" fn get_resize_hints(_plugin: *const clap_plugin, _hints: *mut clap_gui_resize_hints) -> bool {
+    unsafe extern "C" fn get_resize_hints(_plugin: *const clap_plugin, hints: *mut clap_gui_resize_hints) -> bool {
         tracing::trace!("gui::get_resize_hints");
 
+        // Temporary hack: clap-wrapper reads the uninitialized hints even when returning false here, which would result into random flags here.
+        unsafe {
+            if let Some(hints) = hints.as_mut() { 
+                *hints = std::mem::zeroed();
+            }
+        }
         false
     }
 
