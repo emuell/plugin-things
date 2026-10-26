@@ -36,6 +36,7 @@ pub struct PluginCanvasWindowAdapter {
     scale: AtomicF64,
 
     pending_draw: AtomicBool,
+    render_failed: AtomicBool,
     buttons_down: AtomicUsize,
     pending_mouse_exit: AtomicBool,
 
@@ -96,6 +97,7 @@ impl PluginCanvasWindowAdapter {
                 scale: scale.into(),
 
                 pending_draw: AtomicBool::new(true),
+                render_failed: Default::default(),
                 buttons_down: Default::default(),
                 pending_mouse_exit: Default::default(),
 
@@ -170,8 +172,7 @@ impl PluginCanvasWindowAdapter {
                 i_slint_core::platform::update_timers_and_animations();
 
                 if self.pending_draw.swap(false, Ordering::Relaxed) {
-                    // Ignore the draw outcome as we're constantly drawing anyway
-                    let _ = self.renderer.render().unwrap();
+                    self.draw();
                 }
 
                 EventResponse::Handled
@@ -335,6 +336,42 @@ impl PluginCanvasWindowAdapter {
         slint::LogicalPosition {
             x: position.x as _,
             y: position.y as _,
+        }
+    }
+
+    fn draw(&self) {
+        // Rendering may fail when the graphics device got lost. Try recreating the render surface before drawing again.
+        if self.render_failed.load(Ordering::Relaxed) && !self.try_restore_render_surface() {
+            return;
+        }
+        // Ignore the draw outcome as we're constantly drawing anyway, only handle errors.
+        match self.renderer.render() {
+            Ok(_) => {
+                if self.render_failed.swap(false, Ordering::Relaxed) {
+                    tracing::info!("Recovered from render error");
+                }
+            }
+            Err(err) => {
+                // Only log the first error until rendering works again
+                if !self.render_failed.swap(true, Ordering::Relaxed) {
+                    tracing::error!("Error rendering, recreating render surface: {err}");
+                }
+                self.pending_draw.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    // Recreates the render surface after a render error. Returns false when this failed and drawing should be skipped.
+    fn try_restore_render_surface(&self) -> bool {
+        debug_assert!(self.render_failed.load(Ordering::Relaxed), "Restoring is only needed on render errors");
+        // `SkiaRenderer::set_window_handle` will release the window surface on all platforms, and try creating a new one.
+        if let Err(err) = self.renderer.set_window_handle(self.plugin_canvas_window.clone(), self.plugin_canvas_window.clone(), *self.physical_size.borrow(), None) {
+            // Device may not be available yet: keep retrying on the next frame
+            tracing::debug!("Error recreating render surface: {err}");
+            self.pending_draw.store(true, Ordering::Relaxed);
+            false
+        } else {
+            true
         }
     }
 }
