@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::fmt::Debug;
+use std::mem::ManuallyDrop;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering, AtomicUsize};
 use std::sync::Arc;
@@ -25,8 +26,8 @@ thread_local! {
 }
 
 pub struct PluginCanvasWindowAdapter {
-    // renderer needs to be declared first so it's dropped first
-    renderer: SkiaRenderer,
+    // renderer is dropped manually first, before all other fields, see Drop impl
+    renderer: ManuallyDrop<SkiaRenderer>,
     plugin_canvas_window: Arc<plugin_canvas::Window>,
     slint_window: slint::Window,
 
@@ -89,7 +90,7 @@ impl PluginCanvasWindowAdapter {
             Self {
                 plugin_canvas_window,
                 slint_window,
-                renderer,
+                renderer: ManuallyDrop::new(renderer),
 
                 view: Default::default(),
 
@@ -340,43 +341,34 @@ impl PluginCanvasWindowAdapter {
     }
 
     fn draw(&self) {
-        // Rendering may fail when the graphics device got lost. Try recreating the render surface before drawing again.
-        if self.render_failed.load(Ordering::Relaxed) && !self.try_restore_render_surface() {
+        // Render errors usually mean that the graphics device got lost. Skia's graphics context crashes when
+        // using it after that, and Slint 1.17 can't recreate it safely, so stop rendering after the first error.
+        if self.render_failed.load(Ordering::Relaxed) {
             return;
         }
-        // Ignore the draw outcome as we're constantly drawing anyway, only handle errors.
         match self.renderer.render() {
             Ok(outcome) => {
-                // Restore render_failed state when rendering succeeded after an error.
-                if self.render_failed.swap(false, Ordering::Relaxed) {
-                    tracing::info!("Recovered from render error");
-                }
                 if outcome != DrawOutcome::Success {
                     // Retry on the next frame: The frame may have been skipped when e.g. the window is occluded.
                     self.pending_draw.store(true, Ordering::Relaxed);
                 }
             }
             Err(err) => {
-                // Only log the first error until rendering works again
-                if !self.render_failed.swap(true, Ordering::Relaxed) {
-                    tracing::error!("Error rendering, recreating render surface: {err}");
-                }
-                self.pending_draw.store(true, Ordering::Relaxed);
+                tracing::error!("Error rendering, stopping rendering: {err}");
+                self.render_failed.store(true, Ordering::Relaxed);
             }
         }
     }
+}
 
-    // Recreates the render surface after a render error. Returns false when this failed and drawing should be skipped.
-    fn try_restore_render_surface(&self) -> bool {
-        debug_assert!(self.render_failed.load(Ordering::Relaxed), "Restoring is only needed on render errors");
-        // `SkiaRenderer::set_window_handle` will release the window surface on all platforms, and try creating a new one.
-        if let Err(err) = self.renderer.set_window_handle(self.plugin_canvas_window.clone(), self.plugin_canvas_window.clone(), *self.physical_size.borrow(), None) {
-            // Device may not be available yet: keep retrying on the next frame
-            tracing::debug!("Error recreating render surface: {err}");
-            self.pending_draw.store(true, Ordering::Relaxed);
-            false
+impl Drop for PluginCanvasWindowAdapter {
+    fn drop(&mut self) {
+        if self.render_failed.load(Ordering::Relaxed) {
+            // Destroying Skia's graphics context crashes when its device got lost: leak it instead.
+            tracing::warn!("Leaking renderer after render error");
         } else {
-            true
+            // SAFETY: renderer is not accessed after this
+            unsafe { ManuallyDrop::drop(&mut self.renderer) };
         }
     }
 }
@@ -419,6 +411,10 @@ impl WindowAdapter for PluginCanvasWindowAdapter {
         logical_size.width /= scale as f32;
         logical_size.height /= scale as f32;
 
+        // Resizing makes the renderer resize its surface, which uses the graphics context: avoid this after render errors.
+        if self.render_failed.load(Ordering::Relaxed) {
+            return;
+        }
         self.slint_window.dispatch_event(
             WindowEvent::Resized { size: logical_size },
         );
@@ -429,7 +425,7 @@ impl WindowAdapter for PluginCanvasWindowAdapter {
     }
 
     fn renderer(&self) -> &dyn Renderer {
-        &self.renderer
+        &*self.renderer
     }
 
     fn internal(&self, _: i_slint_core::InternalToken) -> Option<&dyn WindowAdapterInternal> {
