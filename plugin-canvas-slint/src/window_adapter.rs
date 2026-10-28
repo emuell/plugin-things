@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::platform::CallbackQueue;
 
 use cursor_icon::CursorIcon;
-use i_slint_core::{window::{WindowAdapter, WindowAdapterInternal}, renderer::Renderer, platform::{PlatformError, WindowEvent}};
+use i_slint_core::{window::{WindowAdapter, WindowAdapterInternal}, renderer::{DrawOutcome, Renderer}, platform::{PlatformError, WindowEvent}};
 use i_slint_renderer_skia::{SkiaRenderer, SkiaSharedContext};
 use keyboard_types::Code;
 #[cfg(target_os="macos")]
@@ -346,9 +346,14 @@ impl PluginCanvasWindowAdapter {
         }
         // Ignore the draw outcome as we're constantly drawing anyway, only handle errors.
         match self.renderer.render() {
-            Ok(_) => {
+            Ok(outcome) => {
+                // Restore render_failed state when rendering succeeded after an error.
                 if self.render_failed.swap(false, Ordering::Relaxed) {
                     tracing::info!("Recovered from render error");
+                }
+                if outcome != DrawOutcome::Success {
+                    // Retry on the next frame: The frame may have been skipped when e.g. the window is occluded.
+                    self.pending_draw.store(true, Ordering::Relaxed);
                 }
             }
             Err(err) => {
