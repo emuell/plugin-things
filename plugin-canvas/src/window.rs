@@ -13,18 +13,31 @@ use crate::screen::screen_scale;
 pub struct WindowAttributes {
     pub(crate) size: LogicalSize,
     pub(crate) scale: f64,
+    pub(crate) software_rendering: bool,
 }
 
 impl WindowAttributes {
     pub fn new(size: LogicalSize, scale: f64) -> Self {
+        let software_rendering = false;
         Self {
             size,
             scale,
+            software_rendering,
         }
     }
 
     pub fn with_size(size: LogicalSize) -> Self {
         Self::new(size, 1.0)
+    }
+
+    /// Force using software renderers for drawing instead of the platform's default GPU renderer.
+    pub fn with_software_rendering(mut self, software_rendering: bool) -> Self {
+        self.software_rendering = software_rendering;
+        self
+    }
+
+    pub fn software_rendering(&self) -> bool {
+        self.software_rendering
     }
 
     pub fn size(&self) -> LogicalSize {
